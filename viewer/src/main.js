@@ -73,6 +73,11 @@ class PipelineViewer {
         const viewDataBtn = document.getElementById('btn-view-data');
         if (viewDataBtn) viewDataBtn.onclick = () => this.viewCurrentDataTable();
 
+        // Legend click handlers for filtering
+        document.getElementById('legend-critical').onclick = () => this.filterByStatus('Critical');
+        document.getElementById('legend-review').onclick = () => this.filterByStatus('Review Required');
+        document.getElementById('legend-normal').onclick = () => this.filterByStatus('Normal');
+
         this.init();
         this.animate();
         window.viewer = this;
@@ -313,6 +318,92 @@ class PipelineViewer {
         this.criticalIndex = (this.criticalIndex + 1) % criticals.length;
         const item = criticals[this.criticalIndex];
         this.jumpTo(item);
+    }
+
+    filterByStatus(status) {
+        console.log(`Filtering anomalies by status: ${status}`);
+
+        // Check if this filter is already active - if so, toggle it off
+        if (this.activeStatusFilter === status) {
+            console.log(`Toggling off filter: ${status}`);
+            this.activeStatusFilter = null;
+
+            // Show all anomalies
+            this.anomalies.forEach(mesh => {
+                mesh.visible = true;
+            });
+
+            // Clear legend active state
+            this.updateLegendActiveState(null);
+
+            // Show message
+            this.showSystemMessage(`Filter removed. Showing all anomalies.`);
+            return;
+        }
+
+        // Count how many anomalies have this status in the data
+        const dataCount = this.anomalyData.filter(a => a.status === status).length;
+        console.log(`Found ${dataCount} ${status} anomalies in data`);
+
+        if (dataCount === 0) {
+            alert(`No ${status} anomalies found.`);
+            return;
+        }
+
+        // Set active filter
+        this.activeStatusFilter = status;
+
+        // Filter meshes directly by their userData.status
+        let visibleCount = 0;
+        let firstVisible = null;
+
+        this.anomalies.forEach(mesh => {
+            if (mesh.userData && mesh.userData.status === status) {
+                mesh.visible = true;
+                visibleCount++;
+                if (!firstVisible) firstVisible = mesh;
+            } else {
+                mesh.visible = false;
+            }
+        });
+
+        console.log(`Made ${visibleCount} meshes visible for status: ${status}`);
+
+        // Update legend to show active filter
+        this.updateLegendActiveState(status);
+
+        // Show message
+        this.showSystemMessage(`Showing ${visibleCount} ${status} anomalies. Click again to remove filter.`);
+
+        // Jump to first visible anomaly
+        if (firstVisible) {
+            this.jumpTo(firstVisible.userData);
+        }
+    }
+
+    updateLegendActiveState(activeStatus) {
+        // Remove active state from all
+        ['legend-critical', 'legend-review', 'legend-normal'].forEach(id => {
+            const elem = document.getElementById(id);
+            if (elem) {
+                elem.classList.remove('ring-2', 'ring-white', 'bg-white/10');
+            }
+        });
+
+        // Add active state to selected
+        const statusMap = {
+            'Critical': 'legend-critical',
+            'Review Required': 'legend-review',
+            'Normal': 'legend-normal'
+        };
+
+        const activeId = statusMap[activeStatus];
+        if (activeId) {
+            const elem = document.getElementById(activeId);
+            if (elem) {
+                elem.classList.add('ring-2', 'ring-white', 'bg-white/10');
+            }
+        }
     }
 
     setupCamera() {
@@ -833,12 +924,12 @@ class PipelineViewer {
 
             // Determine why it's critical
             let reason = '';
-            if (a.depth_22 >= 80) {
-                reason = 'Severe depth (≥80%)';
-            } else if (a.annual_growth_rate >= 5) {
-                reason = 'Rapid growth rate';
-            } else if (a.depth_22 >= 60 && a.annual_growth_rate >= 2) {
-                reason = 'High depth + growth';
+            if (a.depth_22 >= 30) {
+                reason = 'High depth (≥30%)';
+            } else if (a.annual_growth_rate >= 1.2) {
+                reason = 'Rapid growth rate (≥1.2%/yr)';
+            } else if (a.depth_22 >= 25 && a.annual_growth_rate >= 0.8) {
+                reason = 'Moderate depth + growth';
             } else {
                 reason = 'Multiple risk factors';
             }
@@ -934,7 +1025,20 @@ class PipelineViewer {
                 if (r.dist) r.dist -= 20;
             });
 
+            // CRITICAL FIX: Recalculate status for all anomalies
+            // The JSON file has hardcoded status='New', we need to recalculate based on depth and growth
+            this.anomalyData.forEach(a => {
+                const depth = a.depth_22 || a.depth || 0;
+                const growthRate = a.annual_growth_rate || 0;
+                a.status = this.calculateStatus(depth, growthRate);
+            });
+
             console.log(`Data loaded successfully. Anomalies: ${this.anomalyData.length}, References: ${this.referenceData.length}`);
+
+            // Log critical count for debugging
+            const criticalCount = this.anomalyData.filter(a => a.status === 'Critical').length;
+            console.log(`Critical zones found: ${criticalCount}`);
+
         } catch (error) {
             console.error('CRITICAL: Error loading data:', error);
             // Show error in UI
@@ -1041,7 +1145,7 @@ class PipelineViewer {
             // Color based on severity
             let color = 0x22c55e; // green-500 (Normal)
             if (item.status === 'Critical') color = 0xC40D3C; // Brand Red
-            else if (item.confidence_label === 'Review Required') color = 0xf97316; // orange-500
+            else if (item.confidence_label === 'Review Required') color = 0xeab308; // yellow-500
 
             // Size patches by depth percentage (larger depth = larger patch)
             // Scale from 0.3 to 1.5 based on depth
@@ -1312,6 +1416,10 @@ class PipelineViewer {
             this.createJointLabels();
         }
 
+        // Clear legend active state and status filter
+        this.activeStatusFilter = null;
+        this.updateLegendActiveState(null);
+
         console.log('Range filter reset');
     }
 
@@ -1501,7 +1609,7 @@ class PipelineViewer {
             } else {
                 const failReason = !item.dist_within_tolerance ? 'Distance exceeds 5 ft tolerance' : 'Orientation exceeds 60° tolerance';
                 validationBadge = `
-    <div class="bg-orange-900/20 p-3 rounded-lg border border-orange-500/30 mb-3">
+    <div class="bg-yellow-900/20 p-3 rounded-lg border border-yellow-500/30 mb-3">
                         <div class="flex items-center gap-2 mb-2">
                             <svg class="w-4 h-4 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
@@ -1612,7 +1720,7 @@ class PipelineViewer {
         <span class="stat-value text-${confidenceColor}-400">${item.confidence_label}</span>
     </div>
     ${item.confidence_label === 'Review Required' && item.review_reasons ? `
-                <div class="bg-orange-900/20 p-2 rounded border border-orange-500/30 mb-2">
+                <div class="bg-yellow-900/20 p-2 rounded border border-yellow-500/30 mb-2">
                     <div class="text-[10px] text-orange-300 font-semibold mb-1">Review Reasons:</div>
                     <div class="text-[9px] text-orange-400/80">${item.review_reasons}</div>
                 </div>
@@ -2521,9 +2629,10 @@ class PipelineViewer {
 
     calculateStatus(depth, growthRate) {
         // Determine status based on depth and growth rate
-        if (depth >= 80 || growthRate >= 5 || (depth >= 60 && growthRate >= 2)) {
+        // Adjusted thresholds to match actual data ranges (max depth ~37%)
+        if (depth >= 30 || growthRate >= 1.2 || (depth >= 25 && growthRate >= 0.8)) {
             return 'Critical';
-        } else if (depth >= 40 || growthRate >= 2) {
+        } else if (depth >= 15 || growthRate >= 0.5) {
             return 'Review Required';
         }
         return 'Normal';
@@ -2989,7 +3098,7 @@ class PipelineViewer {
             return;
         }
 
-        // Define CSV headers for current alignment data
+        // Define table headers (removed: Status, Length, Width, Year, Is Match, Matched With)
         const headers = [
             'Index',
             'Distance (ft)',
@@ -2997,57 +3106,226 @@ class PipelineViewer {
             'Joint Number',
             'Depth %',
             'Event Type',
-            'Status',
-            'Length',
-            'Width',
-            'Year',
-            'Is Match',
-            'Matched With',
             'Annual Growth Rate',
             'Confidence Label',
             'Severity Score'
         ];
 
-        // Convert current anomaly data to CSV rows
+        // Convert current anomaly data to table rows
         const rows = this.anomalyData.map((item, index) => {
+            // Calculate joint number from distance (approximately 40ft per joint)
+            const distance = item.dist_22_aligned || item.distance || 0;
+            const calculatedJoint = Math.round(distance / 40);
+
             return [
                 index + 1,
-                (item.dist_22_aligned || item.distance || 0).toFixed(2),
+                distance.toFixed(2),
                 (item.orient_22 || item.orientation || 0).toFixed(1),
-                item.joint_number || item.joint_22 || 'N/A',
+                calculatedJoint,
                 (item.depth_22 || item.depth || 0).toFixed(2),
-                item.event_type || 'Unknown',
-                item.status || 'Normal',
-                (item.length || 0).toFixed(1),
-                (item.width || 0).toFixed(1),
-                item.year || new Date().getFullYear(),
-                item.is_match ? 'Yes' : 'No',
-                item.matched_with || 'N/A',
+                item.anomaly_type || item.event_type || 'metal loss',
                 (item.annual_growth_rate || 0).toFixed(3),
                 item.confidence_label || 'Normal',
                 (item.severity_score || 0).toFixed(2)
             ];
         });
 
-        // Build CSV content
-        let csvContent = headers.join(',') + '\n';
-        rows.forEach(row => {
-            csvContent += row.join(',') + '\n';
-        });
+        // Build HTML table
+        let htmlContent = `
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reference Data - Pipeline Analysis</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+            color: #e2e8f0;
+            padding: 2rem;
+            min-height: 100vh;
+        }
+        
+        .container {
+            max-width: 1400px;
+            margin: 0 auto;
+            background: rgba(30, 41, 59, 0.6);
+            backdrop-filter: blur(10px);
+            border-radius: 16px;
+            padding: 2rem;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+            border: 1px solid rgba(148, 163, 184, 0.1);
+        }
+        
+        h1 {
+            font-size: 2rem;
+            font-weight: 700;
+            margin-bottom: 0.5rem;
+            color: #22d3ee;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+        
+        .subtitle {
+            color: #94a3b8;
+            margin-bottom: 2rem;
+            font-size: 0.95rem;
+        }
+        
+        .stats {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 2rem;
+            flex-wrap: wrap;
+        }
+        
+        .stat-card {
+            background: rgba(15, 23, 42, 0.5);
+            padding: 1rem 1.5rem;
+            border-radius: 12px;
+            border: 1px solid rgba(148, 163, 184, 0.1);
+            flex: 1;
+            min-width: 200px;
+        }
+        
+        .stat-label {
+            font-size: 0.75rem;
+            color: #94a3b8;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            margin-bottom: 0.25rem;
+        }
+        
+        .stat-value {
+            font-size: 1.5rem;
+            font-weight: 700;
+            color: #22d3ee;
+        }
+        
+        .table-wrapper {
+            overflow-x: auto;
+            border-radius: 12px;
+            border: 1px solid rgba(148, 163, 184, 0.1);
+        }
+        
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.875rem;
+        }
+        
+        thead {
+            background: linear-gradient(135deg, #1e293b 0%, #334155 100%);
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+        
+        th {
+            padding: 1rem 0.75rem;
+            text-align: left;
+            font-weight: 600;
+            color: #22d3ee;
+            text-transform: uppercase;
+            font-size: 0.75rem;
+            letter-spacing: 0.05em;
+            border-bottom: 2px solid rgba(34, 211, 238, 0.3);
+            white-space: nowrap;
+        }
+        
+        tbody tr {
+            border-bottom: 1px solid rgba(148, 163, 184, 0.1);
+            transition: background-color 0.2s ease;
+        }
+        
+        tbody tr:hover {
+            background: rgba(34, 211, 238, 0.05);
+        }
+        
+        tbody tr:nth-child(even) {
+            background: rgba(15, 23, 42, 0.3);
+        }
+        
+        tbody tr:nth-child(even):hover {
+            background: rgba(34, 211, 238, 0.08);
+        }
+        
+        td {
+            padding: 0.875rem 0.75rem;
+            color: #cbd5e1;
+        }
+        
+        .icon {
+            width: 32px;
+            height: 32px;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>
+            <svg class="icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                    d="M3 10h18M3 14h18m-9-4v8m-7 0h14a2 2 0 002-2V8a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z">
+                </path>
+            </svg>
+            Reference Data
+        </h1>
+        <p class="subtitle">Pipeline Anomaly Analysis - Complete Dataset</p>
+        
+        <div class="stats">
+            <div class="stat-card">
+                <div class="stat-label">Total Records</div>
+                <div class="stat-value">${rows.length}</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Average Depth</div>
+                <div class="stat-value">${(rows.reduce((sum, r) => sum + parseFloat(r[4]), 0) / rows.length).toFixed(1)}%</div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-label">Max Depth</div>
+                <div class="stat-value">${Math.max(...rows.map(r => parseFloat(r[4]))).toFixed(1)}%</div>
+            </div>
+        </div>
+        
+        <div class="table-wrapper">
+            <table>
+                <thead>
+                    <tr>
+                        ${headers.map(h => `<th>${h}</th>`).join('')}
+                    </tr>
+                </thead>
+                <tbody>
+                    ${rows.map(row => `
+                        <tr>
+                            ${row.map((cell, idx) => {
+            return `<td>${cell}</td>`;
+        }).join('')}
+                        </tr>
+                    `).join('')}
+                </tbody>
+            </table>
+        </div>
+    </div>
+</body>
+</html>
+        `;
 
-        // Create blob and open in new tab
-        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-        const url = URL.createObjectURL(blob);
-
-        // Open in new tab
-        const newWindow = window.open(url, '_blank');
-        if (!newWindow) {
-            // Fallback: download if popup blocked
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = 'current_alignment_data.csv';
-            link.click();
-            URL.revokeObjectURL(url);
+        // Open HTML in new tab
+        const newWindow = window.open('', '_blank');
+        if (newWindow) {
+            newWindow.document.write(htmlContent);
+            newWindow.document.close();
+        } else {
+            alert('Please allow popups to view the reference data table.');
         }
     }
 
