@@ -155,7 +155,7 @@
             <!-- Upload Box (Reduced size and flex priority) -->
             <input type="file" id="file-input" accept=".xlsx,.xls,.csv,.json,.tsv,.txt" class="hidden">
             <div id="upload-box"
-                class="shrink-0 h-[200px] border-2 border-dashed border-slate-700 hover:border-slate-500 rounded-3xl bg-slate-800/20 hover:bg-slate-800/40 transition-all flex flex-col items-center justify-center p-6 gap-4 cursor-pointer group mb-6">
+                class="shrink-0 h-[200px] border-2 border-dashed border-slate-700 hover:border-slate-500 rounded-3xl bg-slate-800/20 hover:bg-slate-800/40 transition-all flex flex-col items-center justify-center p-6 gap-4 cursor-pointer group mb-2">
                 <div
                     class="w-12 h-12 rounded-full bg-slate-800 flex items-center justify-center group-hover:scale-110 group-hover:bg-slate-700 transition-all shadow-xl">
                     <svg class="w-6 h-6 text-slate-400 group-hover:text-cyan-400 transition-colors" fill="none"
@@ -169,6 +169,13 @@
                     <p class="text-xs text-slate-500">or click to browse</p>
                     <p class="text-[10px] text-slate-600 mt-2">Supports: Excel, CSV, JSON, TSV (max 50MB)</p>
                 </div>
+            </div>
+
+            <div class="text-center mb-6">
+                <button id="btn-load-demo"
+                    class="text-xs text-cyan-400 hover:text-cyan-300 hover:underline cursor-pointer">
+                    Don't have a file? Load Demo Data
+                </button>
             </div>
 
             <!-- Upload Status -->
@@ -191,13 +198,53 @@
 
             <!-- Process Button -->
             <button id="btn-process-upload"
-                class="hidden w-full bg-[#C40D3C] hover:bg-[#9F0A30] text-white font-semibold py-3 rounded-xl shadow-lg shadow-[#C40D3C]/20 transition-all transform active:scale-[0.98] flex items-center justify-center gap-3 text-sm tracking-wide uppercase mb-6 shrink-0">
+                class="hidden w-full bg-[#C40D3C] hover:bg-[#9F0A30] text-white font-semibold py-3 rounded-xl shadow-lg shadow-[#C40D3C]/20 transition-all transform active:scale-[0.98] flex items-center justify-center gap-3 text-sm tracking-wide uppercase mb-3 shrink-0">
                 <svg class="w-5 h-5 animate-pulse" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                         d="M13 10V3L4 14h7v7l9-11h-7z"></path>
                 </svg>
                 Process & Visualize
             </button>
+
+            <!-- Predict Button -->
+            <button id="btn-predict"
+                class="hidden w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3 rounded-xl shadow-lg shadow-purple-600/20 transition-all transform active:scale-[0.98] flex items-center justify-center gap-3 text-sm tracking-wide uppercase mb-3 shrink-0">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                        d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z">
+                    </path>
+                </svg>
+                Predict Future (2029)
+            </button>
+
+            <!-- Prediction Navigation Controls -->
+            <div id="prediction-nav" class="hidden mb-6 shrink-0">
+                <div class="bg-blue-500/10 border border-blue-500/30 rounded-xl p-4">
+                    <div class="flex items-center justify-between mb-3">
+                        <h3 class="text-sm font-bold text-blue-400">Navigate Predictions</h3>
+                        <span id="prediction-counter"
+                            class="text-xs text-blue-300 font-mono bg-blue-500/20 px-2 py-1 rounded">1 / 50</span>
+                    </div>
+                    <div class="flex gap-2">
+                        <button id="btn-prev-prediction"
+                            class="flex-1 bg-slate-700 hover:bg-slate-600 text-white font-semibold py-2 rounded-lg transition-all flex items-center justify-center gap-2 text-sm">
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                                    d="M15 19l-7-7 7-7"></path>
+                            </svg>
+                            Previous
+                        </button>
+                        <button id="btn-next-prediction"
+                            class="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-semibold py-2 rounded-lg transition-all flex items-center justify-center gap-2 text-sm">
+                            Next
+                            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7">
+                                </path>
+                            </svg>
+                        </button>
+                    </div>
+                </div>
+            </div>
 
             <!-- Joint Comparison Panel -->
             <div id="joint-comparison" class="hidden mb-6 shrink-0">

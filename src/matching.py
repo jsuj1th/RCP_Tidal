@@ -69,6 +69,7 @@ def match_anomalies():
             'depth_15': row15['depth'],
             'depth_22': row22['depth'],
             'growth': depth_growth,
+            'annual_growth_rate': depth_growth / 7.0,
             'match_cost': cost
         })
         

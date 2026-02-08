@@ -58,8 +58,16 @@ class PipelineViewer {
         // Filter toggle functionality
         document.getElementById('btn-toggle-filters').onclick = () => this.toggleFiltersSection();
 
+        // Prediction functionality
+        document.getElementById('btn-predict').onclick = () => this.predictFuture();
+        document.getElementById('btn-prev-prediction').onclick = () => this.navigatePrediction(-1);
+        document.getElementById('btn-next-prediction').onclick = () => this.navigatePrediction(1);
+
         // File upload functionality
         this.setupFileUpload();
+
+        const demoBtn = document.getElementById('btn-load-demo');
+        if (demoBtn) demoBtn.onclick = () => this.loadDemoData();
 
         this.init();
         this.animate();
@@ -684,6 +692,7 @@ class PipelineViewer {
         }
 
         console.log(`Populating joint list. Total joints mapped: ${this.jointMap.size}, Anomalies mapped: ${this.jointAnomalyMap.size} `);
+        console.log('Risk Joint List Element:', list);
 
         // Sort all joints by anomaly count
         const jointRisks = [];
@@ -931,6 +940,7 @@ class PipelineViewer {
     }
 
     createPipeline() {
+        console.log(`Creating Pipeline. Reference Data: ${this.referenceData ? this.referenceData.length : 0} items`);
         // Sort reference data by distance
         const sortedRefs = [...this.referenceData].sort((a, b) => a.dist_22 - b.dist_22);
 
@@ -2027,13 +2037,16 @@ class PipelineViewer {
 
         // 1. First Pass: Identify Matches
         const initialMatches = uploadResult.data.map(row => {
-            let alignedDist = row.distance;
+            // Support both 'distance' and 'distance_aligned'
+            const distance = row.distance !== undefined ? row.distance : (row.distance_aligned !== undefined ? row.distance_aligned : 0);
+
+            let alignedDist = distance; // Use the determined distance for initial alignment
             let isMatch = false;
             let matchId = null;
             let bestMatch = null;
 
             // Try to align with existing data
-            let jointNum = Number(row.joint_number) || Math.floor(row.distance / 40);
+            let jointNum = Number(row.joint_number) || Math.floor(distance / 40); // Use the determined distance for joint number
 
 
 
@@ -2122,13 +2135,18 @@ class PipelineViewer {
         // 3. Final Transformation applying Data and Offset
         const transformedData = initialMatches.map(item => {
             const row = item.row;
-            const jointNum = Number(row.joint_number) || Math.floor(row.distance / 40);
+            // Handle both 'distance' and 'distance_aligned' keys depending on source
+            const distVal = row.distance_aligned !== undefined ? row.distance_aligned : (row.distance !== undefined ? row.distance : 0);
+            const jointNum = Number(row.joint_number) || Math.floor(distVal / 40);
 
             // If NOT matched, apply linear regression model
             let finalDist = item.alignedDist;
             if (!item.isMatch) {
                 // Apply y = mx + c
-                finalDist = (item.originalDist * m) + c;
+                // Use original dist for conversion
+                const originalDistVal = row.distance !== undefined ? row.distance : (row.distance_aligned !== undefined ? row.distance_aligned : 0);
+
+                finalDist = (originalDistVal * m) + c;
             }
 
             // Calculate status using matched data if available, otherwise simplified logic
@@ -2171,7 +2189,7 @@ class PipelineViewer {
                 matched_with: item.matchId,
                 annual_growth_rate: growthRate,
                 is_uploaded: true,
-                global_offset_applied: globalOffset
+                global_offset_applied: c
             };
 
 
@@ -2192,10 +2210,16 @@ class PipelineViewer {
         this.populateCriticalZones();
 
         // Create joint comparison UI
+        console.log('Creating Joint Comparison UI...');
         this.createJointComparison(originalAnomalyData, transformedData);
 
         // Hide process button, show success message
         this.processBtn.classList.add('hidden');
+
+        // Show Predict Button
+        const predictBtn = document.getElementById('btn-predict');
+        if (predictBtn) predictBtn.classList.remove('hidden');
+
         this.showUploadStatus('success', 'Data visualized!',
             `Showing ${transformedData.length} anomalies across the pipeline.`);
 
@@ -2225,6 +2249,7 @@ class PipelineViewer {
         const jointButtonsContainer = document.getElementById('joint-buttons');
 
         comparisonPanel.classList.remove('hidden');
+        console.log('Comparison Panel unhidden. Container:', jointButtonsContainer);
         jointButtonsContainer.innerHTML = '';
 
         // Create button for each joint
@@ -2267,14 +2292,23 @@ class PipelineViewer {
     showJointComparison(jointNum, originalData, uploadedData) {
         console.log(`Showing comparison for joint ${jointNum}`);
 
-        // Get anomalies for this joint
-        const uploadedAnomalies = uploadedData.filter(a =>
-            (a.joint_number || a.joint_22) === jointNum
-        );
+        // Create explicit neighborhood range
+        const range = 2; // +/- 2 joints (Total 5 joints)
+        const minJoint = jointNum - range;
+        const maxJoint = jointNum + range;
 
-        const originalAnomalies = originalData.filter(a =>
-            (a.joint_number || a.joint_22 || a.joint) === jointNum
-        );
+        console.log(`Showing neighborhood for joint ${jointNum} (Range: ${minJoint}-${maxJoint})`);
+
+        // Get anomalies for this neighborhood
+        const uploadedAnomalies = uploadedData.filter(a => {
+            const j = a.joint_number || a.joint_22;
+            return j >= minJoint && j <= maxJoint;
+        });
+
+        const originalAnomalies = originalData.filter(a => {
+            const j = a.joint_number || a.joint_22 || a.joint;
+            return j >= minJoint && j <= maxJoint;
+        });
 
         // Combine both datasets for visualization
         const combinedData = [
@@ -2288,28 +2322,67 @@ class PipelineViewer {
         console.log(`Joint ${jointNum} comparison:`, {
             uploaded: uploadedAnomalies.length,
             existing: originalAnomalies.length,
-            total: combinedData.length,
-            sample: combinedData[0]
+            total: combinedData.length
         });
 
-        // Clear and recreate
+        // Clear visualization
         this.clearVisualization();
-        this.generateReferenceData();
+
+        // MANUALLY GENERATE REFERENCE DATA (PIPE JOINTS)
+        // This ensures the pipe exists even if there are no anomalies on neighbors
+        // Find the distance of our center joint to anchor the neighborhood
+        let centerDist = 0;
+
+        // Try to find center distance from any available data
+        const centerAnomaly = [...originalData, ...uploadedData].find(a =>
+            (a.joint_number || a.joint_22 || a.joint) === jointNum
+        );
+
+        if (centerAnomaly) {
+            centerDist = centerAnomaly.dist_22_aligned || centerAnomaly.distance || centerAnomaly.dist_22 || 0;
+        }
+
+        // Generate joints
+        const neigborJoints = [];
+        for (let j = minJoint; j <= maxJoint; j++) {
+            // Estimate distance: centerDist + (diff * 40)
+            const diff = j - jointNum;
+            const dist = centerDist + (diff * 40);
+
+            neigborJoints.push({
+                joint: j,
+                dist_22: dist - 20, // Center pipe
+                dist: dist - 20,
+                type: 'Girth Weld'
+            });
+        }
+
+        this.referenceData = neigborJoints;
+        console.log('Manually generated reference joints for neighborhood:', this.referenceData);
+
+        // Recreate Pipeline using our manual references
+        // Important: Skip generateReferenceData() call since we just did it manually
         console.log('Creating pipeline for comparison...');
         this.createPipeline();
-        console.log(`Pipeline created: ${this.pipeSegments.length} segments, jointMap size: ${this.jointMap.size}`);
-        this.createAnomaliesWithComparison(); // New method to color-code uploaded vs existing
+        console.log(`Pipeline created: ${this.pipeSegments.length} segments`);
+
+        this.createAnomaliesWithComparison();
         console.log(`Anomalies created: ${this.anomalies.length} anomalies`);
 
-        // Make everything visible first
+        // Make everything visible
         this.anomalies.forEach(mesh => mesh.visible = true);
         this.pipeSegments.forEach(seg => seg.visible = true);
         this.scene.children.forEach(c => {
             if (c.userData.type === 'WeldSeam') c.visible = true;
         });
 
-        // Focus on this joint
-        this.selectJoint(jointNum);
+        // Focus on the center joint
+        // Find the object corresponding to the center joint in our new segments
+        const centerSegment = this.pipeSegments.find(s => s.userData.joint === jointNum);
+        if (centerSegment) {
+            this.jumpTo(centerSegment.userData);
+            this.highlightSegment(centerSegment);
+        }
 
         // Show info panel
         this.showJointComparisonInfo(jointNum, originalAnomalies, uploadedAnomalies);
@@ -2478,6 +2551,7 @@ class PipelineViewer {
         }
 
         if (useActualJoints) {
+            console.log('Mode: Using ACTUAL joint numbers from upload');
             // UPLOADED DATA MODE: Use actual joint numbers
             const jointDistances = new Map();
 
@@ -2489,6 +2563,8 @@ class PipelineViewer {
                     if (!jointDistances.has(jointNum)) {
                         jointDistances.set(jointNum, []);
                     }
+
+
                     jointDistances.get(jointNum).push(dist);
                 }
             });
@@ -2562,6 +2638,343 @@ class PipelineViewer {
         this.removeJointLabels();
 
         console.log('Visualization cleared');
+    }
+
+    async loadDemoData() {
+        if (this.isUploading) return;
+        this.isUploading = true;
+
+        this.showUploadStatus('loading', 'Loading Demo Data...', 'This will simulate a fresh upload.');
+        this.processBtn.classList.add('hidden');
+        document.getElementById('upload-progress').classList.remove('hidden');
+        document.getElementById('progress-bar').style.width = '50%';
+
+        try {
+            const response = await fetch('http://localhost:5000/api/load_demo', {
+                method: 'POST'
+            });
+
+            const result = await response.json();
+
+            document.getElementById('progress-bar').style.width = '100%';
+
+            if (result.success) {
+                // Success!
+                this.uploadedData = result; // Store for processing step
+                this.showUploadStatus('success', 'Demo Loaded!', `Found ${result.stats.total_rows} rows.`);
+                this.processBtn.classList.remove('hidden');
+            } else {
+                throw new Error(result.error || 'Failed to load demo data');
+            }
+
+        } catch (error) {
+            console.error('Demo load error:', error);
+            this.showUploadStatus('error', 'Load Failed', error.message);
+        } finally {
+            this.isUploading = false;
+        }
+    }
+
+    async predictFuture() {
+        if (this.isPredicting) return;
+        this.isPredicting = true;
+
+        const btn = document.getElementById('btn-predict');
+        const originalText = btn.innerHTML;
+        btn.innerHTML = `
+            <svg class="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Running AI Prediction...
+        `;
+
+        try {
+            console.log("Requesting prediction for 7 years ahead...");
+            const response = await fetch('http://localhost:5000/api/predict', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ years: 7 })
+            });
+
+            if (!response.ok) throw new Error("Prediction API failed");
+
+            const predictions = await response.json();
+            console.log(`Received ${predictions.length} predictions`);
+
+            // Visualize predictions
+            this.visualizePredictions(predictions);
+
+            this.addMessage('system', 'Global AI Prediction complete. Showing projected anomalies for 2029 (Purple).');
+
+        } catch (e) {
+            console.error(e);
+            alert('Prediction failed: ' + e.message);
+        } finally {
+            this.isPredicting = false;
+            btn.innerHTML = originalText;
+            btn.disabled = true; // Disable after run to avoid double press
+            btn.classList.add('opacity-50', 'cursor-not-allowed');
+            btn.innerHTML = 'Predicted (2029)';
+        }
+    }
+
+    visualizePredictions(predictions) {
+        // Create new group for predictions
+        if (!this.predictionsGroup) {
+            this.predictionsGroup = new THREE.Group();
+            this.scene.add(this.predictionsGroup);
+        } else {
+            this.predictionsGroup.clear();
+        }
+
+        // HIDE ORIGINAL ANOMALIES to make predictions stand out
+        this.anomalies.forEach(mesh => {
+            if (mesh.userData.type !== 'prediction') {
+                mesh.visible = false;
+            }
+        });
+
+        // Make prediction spheres LARGER and more prominent
+        const geometry = new THREE.SphereGeometry(2.0, 32, 32); // Increased from 1.2 to 2.0, higher quality
+
+        // Materials based on severity - brighter and more emissive
+        const matNormal = new THREE.MeshStandardMaterial({
+            color: 0x3b82f6,
+            emissive: 0x3b82f6,
+            emissiveIntensity: 0.5,
+            roughness: 0.2,
+            metalness: 0.8
+        }); // Blue
+        const matHigh = new THREE.MeshStandardMaterial({
+            color: 0x60a5fa,
+            emissive: 0x60a5fa,
+            emissiveIntensity: 0.6,
+            roughness: 0.2,
+            metalness: 0.8
+        }); // Light Blue
+        const matCritical = new THREE.MeshStandardMaterial({
+            color: 0x93c5fd,
+            emissive: 0x93c5fd,
+            emissiveIntensity: 0.7,
+            roughness: 0.2,
+            metalness: 0.8
+        }); // Lighter Blue
+
+        let firstPrediction = null;
+
+        predictions.forEach((p, index) => {
+            let material = matNormal;
+            if (p.status === 'High Risk') material = matHigh;
+            if (p.status === 'Critical') material = matCritical;
+
+            const mesh = new THREE.Mesh(geometry, material);
+
+            const z = p.dist_22_aligned;
+            const orientation = p.orient_22 || 0;
+            const theta = (orientation * Math.PI) / 180;
+
+            const pipeRadius = 2.0; // Pipe radius
+            const bubbleRadius = 2.3; // Further from surface for visibility
+
+            const x = bubbleRadius * Math.cos(theta);
+            const y = bubbleRadius * Math.sin(theta);
+
+            mesh.position.set(x, y, z);
+
+            // User Data
+            mesh.userData = {
+                ...p,
+                type: 'prediction',
+                year: 2029
+            };
+
+            this.predictionsGroup.add(mesh);
+            this.anomalies.push(mesh);
+
+            // Store first prediction for camera focus
+            if (index === 0) {
+                firstPrediction = mesh;
+            }
+        });
+
+        console.log(`Rendered ${predictions.length} predictions in 3D`);
+
+        // AUTO-FOCUS on first prediction
+        if (firstPrediction) {
+            this.jumpTo(firstPrediction.userData);
+            console.log('Camera focused on first prediction');
+        }
+
+        // Store predictions for navigation
+        this.predictions = predictions;
+        this.currentPredictionIndex = 0;
+
+        // Show navigation controls
+        const navPanel = document.getElementById('prediction-nav');
+        if (navPanel) navPanel.classList.remove('hidden');
+
+        // Update counter
+        this.updatePredictionCounter();
+
+        // Update info panel to show prediction count
+        this.showPredictionInfo(predictions);
+    }
+
+    navigatePrediction(direction) {
+        if (!this.predictions || this.predictions.length === 0) return;
+
+        // Update index with wrapping
+        this.currentPredictionIndex += direction;
+        if (this.currentPredictionIndex < 0) {
+            this.currentPredictionIndex = this.predictions.length - 1;
+        } else if (this.currentPredictionIndex >= this.predictions.length) {
+            this.currentPredictionIndex = 0;
+        }
+
+        // Update counter display
+        this.updatePredictionCounter();
+
+        // Focus on current prediction
+        const currentPrediction = this.predictions[this.currentPredictionIndex];
+        this.jumpTo(currentPrediction);
+
+        // Update info panel with current prediction details
+        this.showCurrentPredictionInfo(currentPrediction);
+    }
+
+    updatePredictionCounter() {
+        const counter = document.getElementById('prediction-counter');
+        if (counter && this.predictions) {
+            counter.textContent = `${this.currentPredictionIndex + 1} / ${this.predictions.length}`;
+        }
+    }
+
+    showCurrentPredictionInfo(prediction) {
+        const infoPanel = document.getElementById('anomaly-info');
+        if (!infoPanel) return;
+
+        const depth = prediction.depth_22 || prediction.predicted_depth || 0;
+        const originalDepth = prediction.original_depth || 0;
+        const growthRate = prediction.predicted_growth_rate || 0;
+        const status = prediction.status || 'Active';
+
+        // Color based on status
+        let statusColor = 'blue-400';
+        let statusBg = 'blue-500/10';
+        let statusBorder = 'blue-500/30';
+        if (status === 'High Risk') {
+            statusColor = 'blue-300';
+            statusBg = 'blue-400/10';
+            statusBorder = 'blue-400/30';
+        } else if (status === 'Critical') {
+            statusColor = 'blue-200';
+            statusBg = 'blue-300/10';
+            statusBorder = 'blue-300/30';
+        }
+
+        infoPanel.innerHTML = `
+            <div class="space-y-3">
+                <div class="flex items-center justify-between border-b border-white/10 pb-2">
+                    <h3 class="text-sm font-bold text-blue-400">Prediction #${this.currentPredictionIndex + 1}</h3>
+                    <span class="text-xs px-2 py-1 rounded bg-${statusBg} border border-${statusBorder} text-${statusColor}">${status}</span>
+                </div>
+                
+                <div class="grid grid-cols-2 gap-3">
+                    <div class="bg-slate-800/50 rounded-lg p-2">
+                        <div class="text-[9px] text-slate-400 uppercase mb-1">Current (2022)</div>
+                        <div class="text-lg font-bold text-slate-300">${originalDepth.toFixed(1)}%</div>
+                    </div>
+                    
+                    <div class="bg-blue-500/10 rounded-lg p-2">
+                        <div class="text-[9px] text-blue-400 uppercase mb-1">Predicted (2029)</div>
+                        <div class="text-lg font-bold text-blue-300">${depth.toFixed(1)}%</div>
+                    </div>
+                </div>
+
+                <div class="bg-slate-800/50 rounded-lg p-3">
+                    <div class="text-[10px] text-slate-400 uppercase mb-2">Details</div>
+                    <div class="space-y-1.5 text-xs">
+                        <div class="flex justify-between">
+                            <span class="text-slate-400">Growth Rate:</span>
+                            <span class="text-blue-300 font-mono">${growthRate.toFixed(2)}% / year</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-slate-400">Distance:</span>
+                            <span class="text-slate-300 font-mono">${(prediction.dist_22_aligned || 0).toFixed(1)} ft</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-slate-400">Orientation:</span>
+                            <span class="text-slate-300 font-mono">${(prediction.orient_22 || 0).toFixed(0)}°</span>
+                        </div>
+                        <div class="flex justify-between">
+                            <span class="text-slate-400">Joint:</span>
+                            <span class="text-slate-300 font-mono">#${prediction.joint_number || 'N/A'}</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    }
+
+    showPredictionInfo(predictions) {
+        const infoPanel = document.getElementById('anomaly-info');
+        if (!infoPanel) return;
+
+        // Count by severity
+        const normalCount = predictions.filter(p => p.status === 'Active').length;
+        const highRiskCount = predictions.filter(p => p.status === 'High Risk').length;
+        const criticalCount = predictions.filter(p => p.status === 'Critical').length;
+
+        infoPanel.innerHTML = `
+            <div class="space-y-3">
+                <div class="flex items-center justify-between border-b border-white/10 pb-2">
+                    <h3 class="text-sm font-bold text-blue-400">2029 Predictions</h3>
+                    <span class="text-xs text-slate-400">${predictions.length} total</span>
+                </div>
+                
+                <div class="grid grid-cols-3 gap-2">
+                    <div class="bg-blue-500/10 border border-blue-500/30 rounded-lg p-2">
+                        <div class="text-[9px] text-blue-400 uppercase mb-1">Normal</div>
+                        <div class="text-xl font-bold text-blue-300">${normalCount}</div>
+                    </div>
+                    
+                    <div class="bg-blue-400/10 border border-blue-400/30 rounded-lg p-2">
+                        <div class="text-[9px] text-blue-300 uppercase mb-1">High Risk</div>
+                        <div class="text-xl font-bold text-blue-200">${highRiskCount}</div>
+                    </div>
+                    
+                    <div class="bg-blue-300/10 border border-blue-300/30 rounded-lg p-2">
+                        <div class="text-[9px] text-blue-200 uppercase mb-1">Critical</div>
+                        <div class="text-xl font-bold text-blue-100">${criticalCount}</div>
+                    </div>
+                </div>
+
+                <div class="bg-slate-800/50 rounded-lg p-3 border border-white/5">
+                    <div class="text-[10px] text-slate-400 uppercase mb-2">Legend</div>
+                    <div class="space-y-1.5">
+                        <div class="flex items-center gap-2">
+                            <div class="w-3 h-3 rounded-full bg-blue-500"></div>
+                            <span class="text-xs text-slate-300">Normal Growth</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <div class="w-3 h-3 rounded-full bg-blue-400"></div>
+                            <span class="text-xs text-slate-300">High Risk (50-80%)</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <div class="w-3 h-3 rounded-full bg-blue-300"></div>
+                            <span class="text-xs text-slate-300">Critical (≥80%)</span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-blue-500/10 border border-blue-500/30 rounded-lg p-2 text-center">
+                    <div class="text-[10px] text-blue-400">
+                        ℹ️ Original anomalies hidden for clarity
+                    </div>
+                </div>
+            </div>
+        `;
     }
 }
 
