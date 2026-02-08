@@ -1,6 +1,14 @@
 # CorroSense AI: Predict. Prevent. Protect.
 
-## 🌟 Inspiration
+## � Demo Video
+
+[![CorroSense AI Demo](https://img.youtube.com/vi/X4Opz9sN5aI/maxresdefault.jpg)](https://youtu.be/X4Opz9sN5aI)
+
+**Watch our demo**: [https://youtu.be/X4Opz9sN5aI](https://youtu.be/X4Opz9sN5aI)
+
+---
+
+## �🌟 Inspiration
 
 The inspiration for CorroSense AI came from a sobering reality: **pipeline failures kill people**. In 2010, a gas pipeline explosion in San Bruno, California killed 8 people and destroyed 38 homes. In 2018, a pipeline explosion in Massachusetts killed one person and damaged 131 structures. These weren't acts of nature—they were preventable failures caused by corrosion that went undetected or unprioritized.
 
