@@ -1,5 +1,8 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { LeafletMapIntegration } from './leafletMap.js';
+import { checkProximityToSensitiveLocations, getProximityAlertLevel, formatLocationType } from './geoData.js';
+import { PIPELINE_START_COORDS, GOOGLE_MAPS_API_KEY } from './config.js';
 
 class PipelineViewer {
     constructor() {
@@ -72,6 +75,11 @@ class PipelineViewer {
 
         const viewDataBtn = document.getElementById('btn-view-data');
         if (viewDataBtn) viewDataBtn.onclick = () => this.viewCurrentDataTable();
+
+        // Leaflet Map Integration (OpenStreetMap - No API Key!)
+        this.mapIntegration = new LeafletMapIntegration();
+        this.mapVisible = false;
+        document.getElementById('btn-toggle-map').onclick = () => this.toggleMap();
 
         this.init();
         this.animate();
@@ -403,9 +411,87 @@ class PipelineViewer {
         // Pipe and anomalies are hidden by default for list-first workflow
         console.log('Viewer initialized. Select a joint from the list to view the pipe.');
 
+        // Initialize Google Maps
+        await this.initializeMap();
+
         await this.setupChat();
     }
 
+    async initializeMap() {
+        try {
+            console.log('Initializing Leaflet map (OpenStreetMap)...');
+            
+            if (!this.mapIntegration) {
+                console.warn('Map integration not initialized');
+                return;
+            }
+            
+            await this.mapIntegration.initMap('map-container');
+            
+            // Draw pipeline on map
+            if (this.anomalies && this.anomalies.length > 0) {
+                const maxDistance = Math.max(...this.anomalies.map(a => a.userData.dist_22_aligned || 0));
+                this.mapIntegration.drawPipeline(maxDistance);
+                
+                // Add anomaly markers
+                const anomalyData = this.anomalies.map(a => a.userData);
+                this.mapIntegration.addAnomalyMarkers(anomalyData);
+            }
+            
+            console.log('Leaflet map initialized successfully - No API key required!');
+        } catch (error) {
+            console.error('Failed to initialize map:', error);
+            console.log('Map features will be disabled.');
+            
+            // Hide map toggle button if map fails to load
+            const mapToggleBtn = document.getElementById('btn-toggle-map');
+            if (mapToggleBtn) {
+                mapToggleBtn.style.display = 'none';
+            }
+        }
+    }
+
+    toggleMap() {
+        this.mapVisible = !this.mapVisible;
+        const mapContainer = document.getElementById('map-container');
+        const toggleText = document.getElementById('map-toggle-text');
+        const canvasContainer = document.getElementById('canvas-container');
+        
+        if (this.mapVisible) {
+            // Show map, hide 3D
+            mapContainer.classList.remove('hidden');
+            mapContainer.style.display = 'block';
+            
+            // Hide canvas
+            if (this.renderer && this.renderer.domElement) {
+                this.renderer.domElement.style.display = 'none';
+            }
+            
+            toggleText.textContent = 'Show 3D';
+            
+            // Trigger map resize to ensure it displays correctly
+            if (this.mapIntegration && this.mapIntegration.map) {
+                this.mapIntegration.resize();
+            }
+            
+            console.log('Map view activated');
+        } else {
+            // Show 3D, hide map
+            mapContainer.classList.add('hidden');
+            mapContainer.style.display = 'none';
+            
+            // Show canvas
+            if (this.renderer && this.renderer.domElement) {
+                this.renderer.domElement.style.display = 'block';
+            }
+            
+            toggleText.textContent = 'Show Map';
+            console.log('3D view activated');
+        }
+    }
+
+    // ==================== STREET VIEW ====================
+    
     async setupChat() {
         // UI Elements
         this.chatWidget = document.getElementById('chat-widget'); // Parent container
@@ -1588,10 +1674,64 @@ class PipelineViewer {
     `;
         }
 
+        // Proximity detection badge
+        let proximityBadge = '';
+        try {
+            const nearbyLocations = checkProximityToSensitiveLocations(item.dist_22_aligned || item.distance || 0);
+            if (nearbyLocations.length > 0) {
+                const alertLevel = getProximityAlertLevel(nearbyLocations);
+                const alertColor = alertLevel === 'critical' ? 'red' : alertLevel === 'high' ? 'orange' : 'yellow';
+                
+                proximityBadge = `
+    <div class="bg-${alertColor}-900/20 p-3 rounded-lg border border-${alertColor}-500/30 mb-3 animate-pulse">
+                        <div class="flex items-center gap-2 mb-2">
+                            <svg class="w-4 h-4 text-${alertColor}-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"></path>
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"></path>
+                            </svg>
+                            <span class="font-bold text-${alertColor}-400 text-xs uppercase">⚠️ PROXIMITY ALERT</span>
+                            <span class="ml-auto text-${alertColor}-300 font-mono text-xs font-bold">${alertLevel.toUpperCase()}</span>
+                        </div>
+                        <div class="text-[10px] text-${alertColor}-300/80 space-y-1">
+                            <div class="font-semibold text-${alertColor}-400 mb-2">Near Sensitive Location${nearbyLocations.length > 1 ? 's' : ''}:</div>
+                            ${nearbyLocations.map(loc => `
+                                <div class="bg-${alertColor}-950/30 p-2 rounded border border-${alertColor}-500/20 mb-1">
+                                    <div class="flex justify-between items-start">
+                                        <span class="font-semibold">${formatLocationType(loc.type)}</span>
+                                        <span class="font-mono text-${alertColor}-400">${loc.distanceToAnomaly} ft</span>
+                                    </div>
+                                    <div class="text-[9px] text-${alertColor}-300/60 mt-1">${loc.name}</div>
+                                    <div class="text-[9px] text-${alertColor}-400 mt-1">Safety radius: ${loc.radius} ft</div>
+                                </div>
+                            `).join('')}
+                            <div class="text-[9px] text-${alertColor}-400 mt-2 font-semibold italic">
+                                ${alertLevel === 'critical' ? '🚨 Immediate inspection and notification required' : 
+                                  alertLevel === 'high' ? '⚠️ Priority inspection within 48 hours' : 
+                                  '📋 Document for compliance reporting'}
+                            </div>
+                        </div>
+                    </div>
+    `;
+                
+                // Highlight on map if map is visible
+                if (this.mapVisible && this.mapIntegration && this.mapIntegration.map) {
+                    try {
+                        this.mapIntegration.highlightAnomalyOnMap(item);
+                    } catch (mapError) {
+                        console.warn('Could not highlight on map:', mapError);
+                    }
+                }
+            }
+        } catch (proximityError) {
+            console.warn('Proximity detection error:', proximityError);
+            // Continue without proximity badge
+        }
+
         container.innerHTML = `
             ${validationBadge}
             ${confidenceBadge}
             ${severityBadge}
+            ${proximityBadge}
 
 <div class="bg-${statusColor}-900/20 p-4 rounded-lg border border-${statusColor}-500/30">
     <div class="flex items-center gap-2 mb-3">
