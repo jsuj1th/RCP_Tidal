@@ -1,0 +1,93 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+canvas {
+  display: block;
+  border-radius: 0.75rem;
+}
+
+#canvas-container {
+  position: relative;
+}
+
+#anomaly-info {
+  @apply space-y-2;
+}
+
+.stat-row {
+  @apply flex justify-between border-b border-white/5 pb-2 mb-2;
+}
+
+.stat-label {
+  @apply text-slate-500 text-xs;
+}
+
+.stat-value {
+  @apply text-sm font-mono text-slate-200;
+}
+
+/* Custom scrollbar for right panel */
+.overflow-y-auto::-webkit-scrollbar {
+  width: 8px;
+}
+
+.overflow-y-auto::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.5);
+  border-radius: 4px;
+}
+
+.overflow-y-auto::-webkit-scrollbar-thumb {
+  background: rgba(71, 85, 105, 0.8);
+  border-radius: 4px;
+}
+
+.overflow-y-auto::-webkit-scrollbar-thumb:hover {
+  background: rgba(100, 116, 139, 0.9);
+}
+
+/* Smooth transitions */
+#filters-section {
+  transition: all 0.3s ease-in-out;
+  max-height: 500px;
+  overflow: hidden;
+}
+
+#filters-section.hidden {
+  max-height: 0;
+  padding: 0;
+  opacity: 0;
+}
+
+#filters-content {
+  transition: all 0.3s ease-in-out;
+  max-height: 1000px;
+  overflow: hidden;
+}
+
+#filters-content.hidden {
+  max-height: 0;
+  padding-top: 0;
+  padding-bottom: 0;
+  opacity: 0;
+}
+
+#filter-chevron {
+  transition: transform 0.3s ease-in-out;
+}
+
+/* Input focus effects */
+input[type="text"]:focus,
+input[type="number"]:focus {
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+/* Button hover effects */
+button {
+  transition: all 0.2s ease-in-out;
+}
+
+button:active {
+  transform: scale(0.98);
+}
+
