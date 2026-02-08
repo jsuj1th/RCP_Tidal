@@ -62,12 +62,16 @@ class PipelineViewer {
         document.getElementById('btn-predict').onclick = () => this.predictFuture();
         document.getElementById('btn-prev-prediction').onclick = () => this.navigatePrediction(-1);
         document.getElementById('btn-next-prediction').onclick = () => this.navigatePrediction(1);
+        document.getElementById('btn-export-predictions').onclick = () => this.exportPredictionsCSV();
 
         // File upload functionality
         this.setupFileUpload();
 
         const demoBtn = document.getElementById('btn-load-demo');
         if (demoBtn) demoBtn.onclick = () => this.loadDemoData();
+
+        const viewDataBtn = document.getElementById('btn-view-data');
+        if (viewDataBtn) viewDataBtn.onclick = () => this.viewCurrentDataTable();
 
         this.init();
         this.animate();
@@ -2915,6 +2919,136 @@ class PipelineViewer {
                 </div>
             </div>
         `;
+    }
+
+    exportPredictionsCSV() {
+        if (!this.predictions || this.predictions.length === 0) {
+            alert('No predictions available to export');
+            return;
+        }
+
+        // Define CSV headers
+        const headers = [
+            'Index',
+            'Distance (ft)',
+            'Orientation (deg)',
+            'Joint Number',
+            'Current Depth (2022) %',
+            'Predicted Depth (2029) %',
+            'Growth Rate (% / year)',
+            'Total Growth %',
+            'Status',
+            'Event Type',
+            'Length',
+            'Width'
+        ];
+
+        // Convert predictions to CSV rows
+        const rows = this.predictions.map((p, index) => {
+            return [
+                index + 1,
+                (p.dist_22_aligned || 0).toFixed(2),
+                (p.orient_22 || 0).toFixed(1),
+                p.joint_number || 'N/A',
+                (p.original_depth || 0).toFixed(2),
+                (p.depth_22 || p.predicted_depth || 0).toFixed(2),
+                (p.predicted_growth_rate || 0).toFixed(3),
+                (p.predicted_growth_total || 0).toFixed(2),
+                p.status || 'Active',
+                p.event_type || 'metal loss',
+                (p.length || 0).toFixed(1),
+                (p.width || 0).toFixed(1)
+            ];
+        });
+
+        // Build CSV content
+        let csvContent = headers.join(',') + '\n';
+        rows.forEach(row => {
+            csvContent += row.join(',') + '\n';
+        });
+
+        // Create blob and open in new tab
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+
+        // Open in new tab
+        const newWindow = window.open(url, '_blank');
+        if (!newWindow) {
+            // Fallback: download if popup blocked
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = 'predictions_2029.csv';
+            link.click();
+            URL.revokeObjectURL(url);
+        }
+    }
+
+    viewCurrentDataTable() {
+        if (!this.anomalyData || this.anomalyData.length === 0) {
+            alert('No data loaded yet. Please load demo data or upload a file first.');
+            return;
+        }
+
+        // Define CSV headers for current alignment data
+        const headers = [
+            'Index',
+            'Distance (ft)',
+            'Orientation (deg)',
+            'Joint Number',
+            'Depth %',
+            'Event Type',
+            'Status',
+            'Length',
+            'Width',
+            'Year',
+            'Is Match',
+            'Matched With',
+            'Annual Growth Rate',
+            'Confidence Label',
+            'Severity Score'
+        ];
+
+        // Convert current anomaly data to CSV rows
+        const rows = this.anomalyData.map((item, index) => {
+            return [
+                index + 1,
+                (item.dist_22_aligned || item.distance || 0).toFixed(2),
+                (item.orient_22 || item.orientation || 0).toFixed(1),
+                item.joint_number || item.joint_22 || 'N/A',
+                (item.depth_22 || item.depth || 0).toFixed(2),
+                item.event_type || 'Unknown',
+                item.status || 'Normal',
+                (item.length || 0).toFixed(1),
+                (item.width || 0).toFixed(1),
+                item.year || new Date().getFullYear(),
+                item.is_match ? 'Yes' : 'No',
+                item.matched_with || 'N/A',
+                (item.annual_growth_rate || 0).toFixed(3),
+                item.confidence_label || 'Normal',
+                (item.severity_score || 0).toFixed(2)
+            ];
+        });
+
+        // Build CSV content
+        let csvContent = headers.join(',') + '\n';
+        rows.forEach(row => {
+            csvContent += row.join(',') + '\n';
+        });
+
+        // Create blob and open in new tab
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+
+        // Open in new tab
+        const newWindow = window.open(url, '_blank');
+        if (!newWindow) {
+            // Fallback: download if popup blocked
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = 'current_alignment_data.csv';
+            link.click();
+            URL.revokeObjectURL(url);
+        }
     }
 
     showPredictionInfo(predictions) {
