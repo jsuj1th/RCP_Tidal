@@ -728,7 +728,17 @@ class PipelineViewer {
         <div class="text-[10px] text-slate-400">${item.count} Anomalies</div>
     </div>
 `;
-            el.onclick = () => this.selectJoint(item.joint);
+            el.onclick = () => {
+                // Route to Neighborhood Filter for consistency
+                const centerInput = document.getElementById('neighbor-center');
+                const radiusInput = document.getElementById('neighbor-radius');
+
+                if (centerInput && radiusInput) {
+                    centerInput.value = item.joint;
+                    radiusInput.value = 5;
+                    this.applyNeighborhoodFilter();
+                }
+            };
             list.appendChild(el);
         });
         console.log(`Populated list with ${jointRisks.length} joints.`);
@@ -850,7 +860,19 @@ class PipelineViewer {
                     ⚠️ ${reason}
                 </div>
 `;
-            item.onclick = () => this.jumpTo(a);
+            item.onclick = () => {
+                // Route to Neighborhood Filter as requested
+                const joint = Number(a.joint_number || a.joint_22 || a.joint);
+
+                const centerInput = document.getElementById('neighbor-center');
+                const radiusInput = document.getElementById('neighbor-radius');
+
+                if (centerInput && radiusInput) {
+                    centerInput.value = joint;
+                    radiusInput.value = 5;
+                    this.applyNeighborhoodFilter();
+                }
+            };
             list.appendChild(item);
         });
     }
@@ -1285,22 +1307,28 @@ class PipelineViewer {
         const center = Number(centerStr.replace(/[^0-9.]/g, ''));
         const radius = parseInt(document.getElementById('neighbor-radius').value) || 5;
 
-        if (isNaN(center)) return;
+        if (isNaN(center)) {
+            console.error('Invalid center joint:', centerStr);
+            return;
+        }
 
         console.log(`Neighborhood filter: target ${center}, radius ${radius} joints`);
+        console.log(`Total sorted joints: ${this.sortedJoints.length}`);
 
         // Find index of nearest joint (preferring the one >= center if not exact)
         let targetIndex = this.sortedJoints.findIndex(j => j >= center);
+        console.log(`Target Index found: ${targetIndex} for joint ${center}`);
 
         // If all joints are smaller than center, take the last one
         if (targetIndex === -1) targetIndex = this.sortedJoints.length - 1;
-        // If center is closer to the previous joint, or if it's a neighborhood search, 
-        // maybe absolute nearest is better? But user asked for "after 1000".
 
         const minIdx = Math.max(0, targetIndex - radius);
         const maxIdx = Math.min(this.sortedJoints.length - 1, targetIndex + radius);
 
+        console.log(`Filtering range indices: [${minIdx}, ${maxIdx}]`);
+
         const visibleJoints = new Set(this.sortedJoints.slice(minIdx, maxIdx + 1));
+        console.log(`Visible joints count: ${visibleJoints.size}`);
 
         let visibleCount = 0;
         this.pipeSegments.forEach(segment => {
@@ -1997,14 +2025,17 @@ class PipelineViewer {
         const AXIAL_TOLERANCE = 5.0; // 5.0 ft tolerance (from matching.py)
         const DEG_TO_FT = 1.0 / 30.0; // 30 degrees approx 1 ft cost
 
-        const transformedData = uploadResult.data.map(row => {
-            // Basic transformation
+        // 1. First Pass: Identify Matches
+        const initialMatches = uploadResult.data.map(row => {
             let alignedDist = row.distance;
             let isMatch = false;
             let matchId = null;
+            let bestMatch = null;
 
             // Try to align with existing data
-            const jointNum = Number(row.joint_number) || Math.floor(row.distance / 40);
+            let jointNum = Number(row.joint_number) || Math.floor(row.distance / 40);
+
+
 
             // Find candidates in same joint
             const candidates = originalAnomalyData.filter(orig => {
@@ -2013,9 +2044,7 @@ class PipelineViewer {
             });
 
             // Find closest candidate using combined cost (Distance + Orientation)
-            let bestMatch = null;
             let minCost = Infinity;
-
             const rowOrient = row.orientation || 0;
 
             candidates.forEach(cand => {
@@ -2029,7 +2058,6 @@ class PipelineViewer {
                 if (orientDiff > 180) orientDiff = 360 - orientDiff;
 
                 // Combined Cost (Euclidean)
-                // Cost = sqrt(dist^2 + (deg/30)^2)
                 const orientCost = orientDiff * DEG_TO_FT;
                 const totalCost = Math.sqrt(distDiff * distDiff + orientCost * orientCost);
 
@@ -2047,8 +2075,84 @@ class PipelineViewer {
             }
 
             return {
+                row,
+                isMatch,
+                matchId,
+                alignedDist,
+                bestMatch,
+                originalDist: row.distance
+            };
+        });
+
+        // 2. Calculate Linear Regression for Global Alignment (Scaling + Offset)
+        // Model: Existing = m * Uploaded + c
+        let sumX = 0, sumY = 0, sumXY = 0, sumX2 = 0;
+        let n = 0;
+
+        initialMatches.forEach(item => {
+            if (item.isMatch) {
+                const x = item.originalDist;
+                const y = item.alignedDist; // This is the 'existing' distance we want to match
+
+                sumX += x;
+                sumY += y;
+                sumXY += x * y;
+                sumX2 += x * x;
+                n++;
+            }
+        });
+
+        let m = 1; // Slope (Scaling factor)
+        let c = 0; // Intercept (Offset)
+
+        if (n >= 2) {
+            // Least squares method
+            m = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+            c = (sumY - m * sumX) / n;
+            console.log(`Linear Regression Alignment: y = ${m.toFixed(6)}x + ${c.toFixed(2)} (based on ${n} matches)`);
+        } else if (n === 1) {
+            // Fallback to simple offset if only one match
+            m = 1;
+            c = (sumY / n) - (sumX / n);
+            console.log(`Single Point Alignment: Offset = ${c.toFixed(2)} ft`);
+        } else {
+            console.log('No matches found for alignment. Using original distances.');
+        }
+
+        // 3. Final Transformation applying Data and Offset
+        const transformedData = initialMatches.map(item => {
+            const row = item.row;
+            const jointNum = Number(row.joint_number) || Math.floor(row.distance / 40);
+
+            // If NOT matched, apply linear regression model
+            let finalDist = item.alignedDist;
+            if (!item.isMatch) {
+                // Apply y = mx + c
+                finalDist = (item.originalDist * m) + c;
+            }
+
+            // Calculate status using matched data if available, otherwise simplified logic
+            let status = 'Normal';
+            let growthRate = 0;
+            let confidenceLabel = 'Normal';
+            let confidenceScore = 0;
+            let severityScore = 0;
+
+            if (item.isMatch && item.bestMatch) {
+                // Inherit historical data and risk assessment
+                growthRate = item.bestMatch.annual_growth_rate || 0;
+                status = item.bestMatch.status || this.calculateStatus(row.depth, growthRate);
+                confidenceLabel = item.bestMatch.confidence_label || 'Normal';
+                confidenceScore = item.bestMatch.confidence_score || 0;
+                severityScore = item.bestMatch.severity_score || 0;
+            } else {
+                // New anomaly - use simplified logic based on depth only
+                status = this.calculateStatus(row.depth, 0);
+            }
+
+            return {
                 // Map to the format expected by createAnomalies()
-                dist_22_aligned: alignedDist, // Use snapped distance if matched
+                dist_22_aligned: finalDist, // Use snapped OR offset distance
                 original_distance: row.distance, // Keep original for reference
                 orient_22: row.orientation || 0,
                 depth_22: row.depth || 0,
@@ -2059,13 +2163,18 @@ class PipelineViewer {
                 width: row.width || 0,
                 year: row.year || new Date().getFullYear(),
                 comments: row.comments || '',
-                status: this.calculateStatus(row.depth, 0),
-                confidence_label: 'Normal',
-                is_match: isMatch,
-                matched_with: matchId,
-                annual_growth_rate: 0,
-                is_uploaded: true
+                status: status,
+                confidence_label: confidenceLabel,
+                confidence_score: confidenceScore,
+                severity_score: severityScore,
+                is_match: item.isMatch,
+                matched_with: item.matchId,
+                annual_growth_rate: growthRate,
+                is_uploaded: true,
+                global_offset_applied: globalOffset
             };
+
+
         });
 
         // Update anomaly data
