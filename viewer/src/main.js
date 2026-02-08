@@ -58,6 +58,9 @@ class PipelineViewer {
         // Filter toggle functionality
         document.getElementById('btn-toggle-filters').onclick = () => this.toggleFiltersSection();
 
+        // File upload functionality
+        this.setupFileUpload();
+
         this.init();
         this.animate();
         window.viewer = this;
@@ -204,6 +207,9 @@ class PipelineViewer {
                 <div class="flex flex-col gap-1 min-w-[160px]">
                     <div class="font-bold text-slate-200 text-xs border-b border-white/10 pb-1 mb-1">${data.event_type || 'Anomaly'}</div>
                     <div class="flex justify-between text-[10px] text-slate-400">
+                        <span>Run Year:</span> <span class="text-purple-400 font-bold">${data.year || '2022'}</span>
+                    </div>
+                    <div class="flex justify-between text-[10px] text-slate-400">
                         <span>Depth:</span> <span class="text-slate-200">${data.depth_22 ? data.depth_22.toFixed(1) + '%' : 'N/A'}</span>
                     </div>
                     <div class="flex justify-between text-[10px] text-slate-400">
@@ -212,6 +218,9 @@ class PipelineViewer {
                      <div class="flex justify-between text-[10px] text-slate-400">
                         <span>Angle:</span> <span class="text-purple-400 font-bold">${data.orient_22 ? data.orient_22.toFixed(1) : 0}°</span>
                     </div>
+                    ${data.is_match ? `<div class="flex justify-between text-[10px] text-green-400 border-t border-white/10 pt-1 mt-1">
+                        <span>Matched:</span> <span class="font-bold">Growth ${data.annual_growth_rate ? data.annual_growth_rate.toFixed(1) : 0}%/yr</span>
+                    </div>` : '<div class="text-[10px] text-orange-400 border-t border-white/10 pt-1 mt-1">New anomaly (unmatched)</div>'}
                     ${data.status === 'Critical' ? '<div class="text-[10px] text-red-400 font-bold mt-1">CRITICAL</div>' : ''}
                 </div>
             `;
@@ -729,8 +738,22 @@ class PipelineViewer {
         console.log(`Selecting joint ${jointNum} `);
         // ISOLATE MODE: Hide all, show only selected joint
         // This creates a focused view for list-first workflow
-        this.pipeSegments.forEach(s => s.visible = false);
-        this.anomalies.forEach(a => a.visible = false);
+        // Skip hiding if already visible (comparison mode)
+        const alreadyVisible = this.anomalies.some(a => a.visible);
+        if (!alreadyVisible) {
+            this.pipeSegments.forEach(s => s.visible = false);
+            this.anomalies.forEach(a => a.visible = false);
+        } else {
+            // In comparison mode, just hide other joints
+            this.pipeSegments.forEach(s => {
+                const segJoint = Number(s.userData.joint);
+                if (segJoint !== jointNum) s.visible = false;
+            });
+            this.anomalies.forEach(a => {
+                const meshJoint = Number(a.userData.joint_number || a.userData.joint_22 || a.userData.joint);
+                if (meshJoint !== jointNum) a.visible = false;
+            });
+        }
         this.scene.children.forEach(c => {
             if (c.userData.type === 'WeldSeam') c.visible = false;
         });
@@ -868,7 +891,15 @@ class PipelineViewer {
 
             this.anomalyData = await anomsRes.json();
             this.referenceData = await refsRes.json();
-            console.log(`Data loaded successfully.Anomalies: ${this.anomalyData.length}, References: ${this.referenceData.length} `);
+
+            // Fix Alignment: Shift original references back 20ft to center pipe on anomalies
+            // This matches the fix applied to Uploaded Data
+            this.referenceData.forEach(r => {
+                if (r.dist_22) r.dist_22 -= 20;
+                if (r.dist) r.dist -= 20;
+            });
+
+            console.log(`Data loaded successfully. Anomalies: ${this.anomalyData.length}, References: ${this.referenceData.length}`);
         } catch (error) {
             console.error('CRITICAL: Error loading data:', error);
             // Show error in UI
@@ -890,15 +921,26 @@ class PipelineViewer {
             side: THREE.DoubleSide
         });
 
-        // Draw segments between consecutive Girth Welds or reference points
-        for (let i = 0; i < sortedRefs.length - 1; i++) {
+        // Draw segments between Girth Welds
+        // Loop through ALL references including the last one
+        for (let i = 0; i < sortedRefs.length; i++) {
             const r1 = sortedRefs[i];
-            const r2 = sortedRefs[i + 1];
             const start = r1.dist_22;
-            const end = r2.dist_22;
-            const segmentLength = end - start;
+            let end;
+            let nextJoint;
 
-            if (segmentLength <= 0) continue;
+            if (i < sortedRefs.length - 1) {
+                const r2 = sortedRefs[i + 1];
+                end = r2.dist_22;
+                nextJoint = r2.joint;
+            } else {
+                // For the last segment, assume 40ft length or extend slightly
+                end = start + 40;
+                nextJoint = Number(r1.joint) + 1;
+            }
+
+            let segmentLength = end - start;
+            if (segmentLength <= 0) segmentLength = 40; // Fallback
 
             const geometry = new THREE.CylinderGeometry(radius, radius, segmentLength, 32, 1, true);
             const segment = new THREE.Mesh(geometry, material.clone());
@@ -911,7 +953,7 @@ class PipelineViewer {
             segment.userData = {
                 type: 'Segment',
                 joint: r1.joint,
-                nextJoint: r2.joint,
+                nextJoint: nextJoint,
                 dist: start,
                 length: segmentLength
             };
@@ -948,30 +990,61 @@ class PipelineViewer {
     createAnomalies() {
         console.log('Creating anomalies...', this.anomalyData.length);
         if (this.anomalyData.length > 0) console.log('First anomaly:', this.anomalyData[0]);
-        // Pipe radius is 2. Position anomalies slightly higher to avoid z-fighting and ensure visibility.
-        const radius = 2.15;
+
+        // Pipe radius - patches sit slightly above surface to avoid z-fighting
+        const pipeRadius = 2.0;
+        const patchRadius = 2.05; // Slightly above pipe surface
+
         this.anomalyData.forEach(item => {
             const z = item.dist_22_aligned;
             const theta = (item.orient_22 * Math.PI) / 180;
 
-            const x = radius * Math.cos(theta);
-            const y = radius * Math.sin(theta);
+            const x = patchRadius * Math.cos(theta);
+            const y = patchRadius * Math.sin(theta);
 
-            let color = 0x22c55e; // green-500
+            // Color based on severity
+            let color = 0x22c55e; // green-500 (Normal)
             if (item.status === 'Critical') color = 0xC40D3C; // Brand Red
             else if (item.confidence_label === 'Review Required') color = 0xf97316; // orange-500
 
-            // Size anomalies by depth
-            const size = Math.max(0.2, item.depth_22 / 50);
-            const geo = new THREE.SphereGeometry(size, 16, 16);
-            const mat = new THREE.MeshPhongMaterial({
-                color,
-                emissive: color,
-                emissiveIntensity: 0.3
+            // Size patches by depth percentage (larger depth = larger patch)
+            // Scale from 0.3 to 1.5 based on depth
+            const depthScale = Math.max(0.3, Math.min(1.5, item.depth_22 / 40));
+            const patchSize = depthScale;
+
+            // Create 3D sphere using SphereGeometry
+            // depthScale controls radius
+            const geo = new THREE.SphereGeometry(patchSize * 0.8, 16, 16); // Slightly adjust scale for 3D volume
+            const mat = new THREE.MeshStandardMaterial({
+                color: color,
+                roughness: 0.3,
+                metalness: 0.2,
+                transparent: true,
+                opacity: 0.9,
             });
             const mesh = new THREE.Mesh(geo, mat);
 
-            mesh.position.set(x, y, z);
+            // Position on pipe surface (radius + sphere radius so it sits ON top)
+            // Adjust position to be slightly embedded or right on surface
+            const surfaceRadius = 2.0; // Pipe radius
+            const sphereRadius = patchSize * 0.8;
+
+            // Re-calculate position to be ON the surface
+            // x,y are currently at radius 2.05 (patchRadius). 
+            // We want center of sphere to be at (Radius + sphereRadius)
+            const displayRadius = surfaceRadius + sphereRadius * 0.5; // Embedded halfway looks best?
+            // Actually, user wants "spheres" centered on the wall (half in, half out)
+            const bubbleRadius = surfaceRadius;
+
+            const x3d = bubbleRadius * Math.cos(theta);
+            const y3d = bubbleRadius * Math.sin(theta);
+
+            mesh.position.set(x3d, y3d, z);
+
+            // No need to lookAt for spheres
+
+            mesh.userData = item;
+
             mesh.userData = item;
             mesh.visible = false; // Hidden by default
             this.scene.add(mesh);
@@ -1038,9 +1111,11 @@ class PipelineViewer {
             this.isGuideLocked = true;
             this.drawMeasurementGuides(item);
 
-            // Show Selection Highlight
+            // Show Selection Highlight (ring around the patch)
             this.selectionMesh.position.copy(intersectsAnom[0].object.position);
-            const size = intersectsAnom[0].object.geometry.parameters.radius * 1.3;
+            // CircleGeometry uses 'radius' parameter instead of sphere's 'radius'
+            const patchRadius = intersectsAnom[0].object.geometry.parameters.radius || 0.5;
+            const size = patchRadius * 1.4;
             this.selectionMesh.scale.set(size, size, size);
             this.selectionMesh.visible = true;
 
@@ -1321,7 +1396,24 @@ class PipelineViewer {
 
     showAnomalyInfo(item) {
         const container = document.getElementById('anomaly-info');
-        const statusColor = item.status === 'Critical' ? 'red' : item.status === 'Review Required' ? 'orange' : 'green';
+
+        // Determine status display based on source and match
+        let statusColor = 'green';
+        let statusText = 'Existing Anomaly';
+
+        if (item.is_uploaded) {
+            if (item.is_match) {
+                statusColor = 'purple';
+                statusText = 'Matched (Recaptured)';
+            } else {
+                statusColor = 'cyan';
+                statusText = 'New (Uploaded)';
+            }
+        } else {
+            // Existing data might have severity
+            statusColor = item.status === 'Critical' ? 'red' : item.status === 'Review Required' ? 'orange' : 'green';
+        }
+
         const confidenceColor = item.confidence_label === 'Confident' ? 'blue' : 'orange';
 
         // Anomaly type badge
@@ -1712,6 +1804,657 @@ class PipelineViewer {
         sprite.scale.set(2.0, 1.0, 1); // Slightly larger for better readability
         return sprite;
     }
+
+    // ==================== FILE UPLOAD FUNCTIONALITY ====================
+
+    setupFileUpload() {
+        // API endpoint configuration
+        this.uploadApiUrl = 'http://localhost:5000/api';
+        this.uploadedData = null;
+
+        // Get DOM elements
+        this.fileInput = document.getElementById('file-input');
+        this.uploadBox = document.getElementById('upload-box');
+        this.uploadStatus = document.getElementById('upload-status');
+        this.statusIcon = document.getElementById('status-icon');
+        this.statusMessage = document.getElementById('status-message');
+        this.statusDetails = document.getElementById('status-details');
+        this.uploadProgress = document.getElementById('upload-progress');
+        this.progressBar = document.getElementById('progress-bar');
+        this.processBtn = document.getElementById('btn-process-upload');
+
+        // Click to browse
+        this.uploadBox.addEventListener('click', () => {
+            this.fileInput.click();
+        });
+
+        // File selection
+        this.fileInput.addEventListener('change', (e) => {
+            if (e.target.files.length > 0) {
+                this.handleFileSelect(e.target.files[0]);
+            }
+        });
+
+        // Drag and drop
+        this.uploadBox.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this.uploadBox.classList.add('border-cyan-500', 'bg-cyan-500/10');
+        });
+
+        this.uploadBox.addEventListener('dragleave', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this.uploadBox.classList.remove('border-cyan-500', 'bg-cyan-500/10');
+        });
+
+        this.uploadBox.addEventListener('drop', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            this.uploadBox.classList.remove('border-cyan-500', 'bg-cyan-500/10');
+
+            if (e.dataTransfer.files.length > 0) {
+                this.handleFileSelect(e.dataTransfer.files[0]);
+            }
+        });
+
+        // Process button
+        this.processBtn.addEventListener('click', () => {
+            if (this.uploadedData) {
+                this.processUploadedData(this.uploadedData);
+            }
+        });
+    }
+
+    async handleFileSelect(file) {
+        console.log('File selected:', file.name, file.size, 'bytes');
+
+        // Validate file size (50MB limit)
+        const maxSize = 50 * 1024 * 1024;
+        if (file.size > maxSize) {
+            this.showUploadStatus('error', 'File too large', `Maximum file size is 50MB. Your file is ${(file.size / (1024 * 1024)).toFixed(1)}MB`);
+            return;
+        }
+
+        // Validate file type
+        const allowedExtensions = ['xlsx', 'xls', 'csv', 'json', 'tsv', 'txt'];
+        const ext = file.name.split('.').pop().toLowerCase();
+        if (!allowedExtensions.includes(ext)) {
+            this.showUploadStatus('error', 'Invalid file type', `Supported formats: ${allowedExtensions.join(', ')}`);
+            return;
+        }
+
+        // Upload file
+        await this.uploadFile(file);
+    }
+
+    async uploadFile(file) {
+        this.showUploadStatus('uploading', 'Uploading file...', file.name);
+        this.uploadProgress.classList.remove('hidden');
+        this.progressBar.style.width = '0%';
+
+        const formData = new FormData();
+        formData.append('file', file);
+        formData.append('filter_references', 'true');
+
+        try {
+            // Simulate progress (since we can't track actual upload progress easily)
+            this.progressBar.style.width = '30%';
+
+            const response = await fetch(`${this.uploadApiUrl}/upload`, {
+                method: 'POST',
+                body: formData
+            });
+
+            this.progressBar.style.width = '70%';
+
+            const result = await response.json();
+
+            this.progressBar.style.width = '100%';
+
+            if (result.success) {
+                this.uploadedData = result;
+                this.showUploadStatus('success', 'File processed successfully!',
+                    `${result.stats.total_rows} rows loaded. Click "Process & Visualize" to view.`);
+
+                // Show process button
+                this.processBtn.classList.remove('hidden');
+
+                // Log column mapping
+                console.log('Column Mapping:', result.column_mapping);
+                if (result.warnings && result.warnings.length > 0) {
+                    console.warn('Warnings:', result.warnings);
+                }
+            } else {
+                this.showUploadStatus('error', 'Processing failed', result.error);
+                this.uploadedData = null;
+            }
+
+        } catch (error) {
+            console.error('Upload error:', error);
+            this.showUploadStatus('error', 'Upload failed', error.message);
+            this.uploadedData = null;
+        } finally {
+            setTimeout(() => {
+                this.uploadProgress.classList.add('hidden');
+            }, 1000);
+        }
+    }
+
+    showUploadStatus(type, message, details = '') {
+        this.uploadStatus.classList.remove('hidden');
+        this.statusMessage.textContent = message;
+        this.statusDetails.textContent = details;
+
+        // Reset classes
+        this.uploadStatus.className = 'mb-4 p-4 rounded-xl border';
+
+        // Set icon and colors based on type
+        if (type === 'uploading') {
+            this.uploadStatus.classList.add('bg-cyan-500/10', 'border-cyan-500/30');
+            this.statusMessage.classList.add('text-cyan-400');
+            this.statusIcon.innerHTML = `
+                <svg class="w-5 h-5 text-cyan-400 animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"></path>
+                </svg>
+            `;
+        } else if (type === 'success') {
+            this.uploadStatus.classList.add('bg-green-500/10', 'border-green-500/30');
+            this.statusMessage.classList.add('text-green-400');
+            this.statusIcon.innerHTML = `
+                <svg class="w-5 h-5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                </svg>
+            `;
+        } else if (type === 'error') {
+            this.uploadStatus.classList.add('bg-red-500/10', 'border-red-500/30');
+            this.statusMessage.classList.add('text-red-400');
+            this.statusIcon.innerHTML = `
+                <svg class="w-5 h-5 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path>
+                </svg>
+            `;
+        }
+    }
+
+    processUploadedData(uploadResult) {
+        console.log('Processing uploaded data...', uploadResult.stats);
+
+        // Reset range filters to ensure new data is visible
+        const rangeStart = document.getElementById('range-start');
+        const rangeEnd = document.getElementById('range-end');
+        if (rangeStart) rangeStart.value = '0';
+        if (rangeEnd) rangeEnd.value = 'max';
+
+        // Store original data before clearing
+        const originalAnomalyData = this.anomalyData ? [...this.anomalyData] : [];
+        this.originalAnomalyData = originalAnomalyData; // Persist for comparison
+
+        // Clear existing visualization
+        this.clearVisualization();
+
+        // Transform uploaded data
+        const AXIAL_TOLERANCE = 5.0; // 5.0 ft tolerance (from matching.py)
+        const DEG_TO_FT = 1.0 / 30.0; // 30 degrees approx 1 ft cost
+
+        const transformedData = uploadResult.data.map(row => {
+            // Basic transformation
+            let alignedDist = row.distance;
+            let isMatch = false;
+            let matchId = null;
+
+            // Try to align with existing data
+            const jointNum = Number(row.joint_number) || Math.floor(row.distance / 40);
+
+            // Find candidates in same joint
+            const candidates = originalAnomalyData.filter(orig => {
+                const origJoint = Number(orig.joint_number || orig.joint_22 || orig.joint);
+                return origJoint === jointNum;
+            });
+
+            // Find closest candidate using combined cost (Distance + Orientation)
+            let bestMatch = null;
+            let minCost = Infinity;
+
+            const rowOrient = row.orientation || 0;
+
+            candidates.forEach(cand => {
+                // Axial distance check (Hard Constraint)
+                const distDiff = Math.abs(cand.dist_22_aligned - row.distance);
+                if (distDiff > AXIAL_TOLERANCE) return;
+
+                // Orientation difference (handling 0-360 wrap)
+                const candOrient = cand.orient_22 || 0;
+                let orientDiff = Math.abs(candOrient - rowOrient);
+                if (orientDiff > 180) orientDiff = 360 - orientDiff;
+
+                // Combined Cost (Euclidean)
+                // Cost = sqrt(dist^2 + (deg/30)^2)
+                const orientCost = orientDiff * DEG_TO_FT;
+                const totalCost = Math.sqrt(distDiff * distDiff + orientCost * orientCost);
+
+                if (totalCost < minCost) {
+                    minCost = totalCost;
+                    bestMatch = cand;
+                }
+            });
+
+            if (bestMatch) {
+                // ALIGNMENT: Snap to existing position
+                alignedDist = bestMatch.dist_22_aligned;
+                isMatch = true;
+                matchId = bestMatch.id;
+            }
+
+            return {
+                // Map to the format expected by createAnomalies()
+                dist_22_aligned: alignedDist, // Use snapped distance if matched
+                original_distance: row.distance, // Keep original for reference
+                orient_22: row.orientation || 0,
+                depth_22: row.depth || 0,
+                event_type: row.event_type || 'Unknown',
+                joint_number: jointNum,
+                joint_22: jointNum,
+                length: row.length || 0,
+                width: row.width || 0,
+                year: row.year || new Date().getFullYear(),
+                comments: row.comments || '',
+                status: this.calculateStatus(row.depth, 0),
+                confidence_label: 'Normal',
+                is_match: isMatch,
+                matched_with: matchId,
+                annual_growth_rate: 0,
+                is_uploaded: true
+            };
+        });
+
+        // Update anomaly data
+        this.anomalyData = transformedData;
+        this.uploadedAnomalyData = transformedData; // Store for comparison
+        this.originalAnomalyData = originalAnomalyData; // Store original for comparison
+
+        // Generate reference data (joints) from the uploaded data
+        this.generateReferenceData();
+
+        // Recreate visualization
+        this.createPipeline();
+        this.createAnomalies();
+        this.populateJointList();
+        this.populateCriticalZones();
+
+        // Create joint comparison UI
+        this.createJointComparison(originalAnomalyData, transformedData);
+
+        // Hide process button, show success message
+        this.processBtn.classList.add('hidden');
+        this.showUploadStatus('success', 'Data visualized!',
+            `Showing ${transformedData.length} anomalies across the pipeline.`);
+
+        console.log('✓ Uploaded data processed and visualized');
+    }
+
+    createJointComparison(originalData, uploadedData) {
+        // Use the transformed data that has correct field names (dist_22_aligned, orient_22)
+        const uploadedTransformed = this.uploadedAnomalyData || uploadedData;
+        const originalTransformed = this.originalAnomalyData || originalData;
+
+        // Get unique joints from both datasets
+        const uploadedJoints = new Set(uploadedTransformed.map(a => a.joint_number || a.joint_22));
+        const originalJoints = new Set(originalTransformed.map(a => a.joint_number || a.joint_22 || a.joint));
+
+        // Combine all joints
+        const allJoints = new Set([...uploadedJoints, ...originalJoints]);
+        const sortedJoints = Array.from(allJoints).sort((a, b) => a - b);
+
+        if (sortedJoints.length === 0) {
+            console.log('No joints to compare');
+            return;
+        }
+
+        // Show comparison panel
+        const comparisonPanel = document.getElementById('joint-comparison');
+        const jointButtonsContainer = document.getElementById('joint-buttons');
+
+        comparisonPanel.classList.remove('hidden');
+        jointButtonsContainer.innerHTML = '';
+
+        // Create button for each joint
+        sortedJoints.forEach(jointNum => {
+            const uploadedCount = uploadedData.filter(a =>
+                (a.joint_number || a.joint_22) === jointNum
+            ).length;
+
+            const originalCount = originalData.filter(a =>
+                (a.joint_number || a.joint_22 || a.joint) === jointNum
+            ).length;
+
+            const button = document.createElement('button');
+            button.className = 'bg-slate-700/50 hover:bg-slate-600/70 p-3 rounded-lg border border-white/10 transition-all text-left group';
+
+            button.innerHTML = `
+                <div class="flex items-center justify-between mb-2">
+                    <span class="text-sm font-bold text-cyan-400 group-hover:text-cyan-300">Joint ${jointNum}</span>
+                    ${uploadedCount > 0 && originalCount > 0 ? '<span class="text-[9px] bg-purple-500/20 text-purple-400 px-1.5 py-0.5 rounded">BOTH</span>' : ''}
+                </div>
+                <div class="space-y-1">
+                    <div class="flex items-center justify-between text-[10px]">
+                        <span class="text-slate-400">Uploaded:</span>
+                        <span class="font-mono font-bold ${uploadedCount > 0 ? 'text-cyan-400' : 'text-slate-600'}">${uploadedCount}</span>
+                    </div>
+                    <div class="flex items-center justify-between text-[10px]">
+                        <span class="text-slate-400">Existing:</span>
+                        <span class="font-mono font-bold ${originalCount > 0 ? 'text-green-400' : 'text-slate-600'}">${originalCount}</span>
+                    </div>
+                </div>
+            `;
+
+            button.onclick = () => this.showJointComparison(jointNum, originalTransformed, uploadedTransformed);
+            jointButtonsContainer.appendChild(button);
+        });
+
+        console.log(`Created comparison for ${sortedJoints.length} joints`);
+    }
+
+    showJointComparison(jointNum, originalData, uploadedData) {
+        console.log(`Showing comparison for joint ${jointNum}`);
+
+        // Get anomalies for this joint
+        const uploadedAnomalies = uploadedData.filter(a =>
+            (a.joint_number || a.joint_22) === jointNum
+        );
+
+        const originalAnomalies = originalData.filter(a =>
+            (a.joint_number || a.joint_22 || a.joint) === jointNum
+        );
+
+        // Combine both datasets for visualization
+        const combinedData = [
+            ...originalAnomalies.map(a => ({ ...a, is_uploaded: false })),
+            ...uploadedAnomalies.map(a => ({ ...a, is_uploaded: true }))
+        ];
+
+        // Update visualization to show both
+        this.anomalyData = combinedData;
+
+        console.log(`Joint ${jointNum} comparison:`, {
+            uploaded: uploadedAnomalies.length,
+            existing: originalAnomalies.length,
+            total: combinedData.length,
+            sample: combinedData[0]
+        });
+
+        // Clear and recreate
+        this.clearVisualization();
+        this.generateReferenceData();
+        console.log('Creating pipeline for comparison...');
+        this.createPipeline();
+        console.log(`Pipeline created: ${this.pipeSegments.length} segments, jointMap size: ${this.jointMap.size}`);
+        this.createAnomaliesWithComparison(); // New method to color-code uploaded vs existing
+        console.log(`Anomalies created: ${this.anomalies.length} anomalies`);
+
+        // Make everything visible first
+        this.anomalies.forEach(mesh => mesh.visible = true);
+        this.pipeSegments.forEach(seg => seg.visible = true);
+        this.scene.children.forEach(c => {
+            if (c.userData.type === 'WeldSeam') c.visible = true;
+        });
+
+        // Focus on this joint
+        this.selectJoint(jointNum);
+
+        // Show info panel
+        this.showJointComparisonInfo(jointNum, originalAnomalies, uploadedAnomalies);
+    }
+
+    createAnomaliesWithComparison() {
+        console.log('Creating anomalies with comparison colors...', this.anomalyData.length);
+
+        const pipeRadius = 2.0;
+        const patchRadius = 2.05;
+
+        this.anomalyData.forEach(item => {
+            // Handle both uploaded and existing data formats
+            const z = item.dist_22_aligned || item.distance || item.dist_22 || 0;
+            const orientation = item.orient_22 || item.orientation || 0;
+            const theta = (orientation * Math.PI) / 180;
+
+            const x = patchRadius * Math.cos(theta);
+            const y = patchRadius * Math.sin(theta);
+
+            // Color based on source and match status:
+            // - Cyan: New/Unmatched uploaded data
+            // - Purple: Matched/Recaptured uploaded data
+            // - Green: Existing data
+            let color = 0x22c55e; // green (existing)
+            if (item.is_uploaded) {
+                if (item.is_match) {
+                    color = 0xa855f7; // purple (matched/recaptured)
+                } else {
+                    color = 0x22d3ee; // cyan (new/unmatched)
+                }
+            }
+
+            const depthScale = Math.max(0.3, Math.min(1.5, item.depth_22 / 40));
+            const patchSize = depthScale;
+            // Create 3D sphere using SphereGeometry
+            // depthScale controls radius
+            const geo = new THREE.SphereGeometry(patchSize * 0.8, 16, 16); // Slightly adjust scale for 3D volume
+            const mat = new THREE.MeshStandardMaterial({
+                color: color,
+                roughness: 0.3,
+                metalness: 0.2,
+                transparent: true,
+                opacity: 0.9,
+            });
+            const mesh = new THREE.Mesh(geo, mat);
+
+            // Position on pipe surface (radius + sphere radius so it sits ON top)
+            const surfaceRadius = 2.0; // Pipe radius
+            const sphereRadius = patchSize * 0.8;
+
+            // Re-calculate position to be ON the surface
+            const bubbleRadius = surfaceRadius;
+
+            const x3d = bubbleRadius * Math.cos(theta);
+            const y3d = bubbleRadius * Math.sin(theta);
+
+            mesh.position.set(x3d, y3d, z);
+
+            // No need to lookAt for spheres
+
+            mesh.userData = item;
+            mesh.visible = true; // Start visible in comparison mode
+            this.scene.add(mesh);
+            this.anomalies.push(mesh);
+
+            // Populate joint map
+            const jointNum = Number(item.joint_number || item.joint_22 || item.joint);
+            if (!this.jointAnomalyMap.has(jointNum)) {
+                this.jointAnomalyMap.set(jointNum, []);
+            }
+            this.jointAnomalyMap.get(jointNum).push(item);
+        });
+    }
+
+    showJointComparisonInfo(jointNum, originalAnomalies, uploadedAnomalies) {
+        const infoPanel = document.getElementById('anomaly-info');
+        if (!infoPanel) return;
+
+        const totalOriginal = originalAnomalies.length;
+        const totalUploaded = uploadedAnomalies.length;
+
+        infoPanel.innerHTML = `
+            <div class="space-y-3">
+                <div class="flex items-center justify-between border-b border-white/10 pb-2">
+                    <h3 class="text-sm font-bold text-cyan-400">Joint ${jointNum} Comparison</h3>
+                </div>
+                
+                <div class="grid grid-cols-2 gap-3">
+                    <div class="bg-cyan-500/10 border border-cyan-500/30 rounded-lg p-3">
+                        <div class="text-[10px] text-cyan-400 uppercase mb-1">Uploaded</div>
+                        <div class="text-2xl font-bold text-cyan-300">${totalUploaded}</div>
+                        <div class="text-[9px] text-slate-400 mt-1">New anomalies</div>
+                    </div>
+                    
+                    <div class="bg-green-500/10 border border-green-500/30 rounded-lg p-3">
+                        <div class="text-[10px] text-green-400 uppercase mb-1">Existing</div>
+                        <div class="text-2xl font-bold text-green-300">${totalOriginal}</div>
+                        <div class="text-[9px] text-slate-400 mt-1">From database</div>
+                    </div>
+                </div>
+
+                <div class="bg-slate-800/50 rounded-lg p-3 border border-white/5">
+                    <div class="text-[10px] text-slate-400 uppercase mb-2">Legend</div>
+                    <div class="space-y-1.5">
+                        <div class="flex items-center gap-2">
+                            <div class="w-3 h-3 rounded-full bg-purple-500"></div>
+                            <span class="text-xs text-slate-300">Matched (Recaptured)</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <div class="w-3 h-3 rounded-full bg-cyan-400"></div>
+                            <span class="text-xs text-slate-300">New (Uploaded Only)</span>
+                        </div>
+                        <div class="flex items-center gap-2">
+                            <div class="w-3 h-3 rounded-full bg-green-500"></div>
+                            <span class="text-xs text-slate-300">Existing Data</span>
+                        </div>
+                    </div>
+                </div>
+
+                ${totalUploaded > 0 && totalOriginal > 0 ? `
+                    <div class="bg-purple-500/10 border border-purple-500/30 rounded-lg p-2 text-center">
+                        <div class="text-[10px] text-purple-400">
+                            ✓ ${uploadedData.filter(d => d.is_match).length} Matched Anomalies
+                        </div>
+                    </div>
+                ` : ''}
+            </div>
+        `;
+    }
+
+
+    calculateStatus(depth, growthRate) {
+        // Determine status based on depth and growth rate
+        if (depth >= 80 || growthRate >= 5 || (depth >= 60 && growthRate >= 2)) {
+            return 'Critical';
+        } else if (depth >= 40 || growthRate >= 2) {
+            return 'Review Required';
+        }
+        return 'Normal';
+    }
+
+    generateReferenceData() {
+        // Generate reference points (joints) - works for BOTH original and uploaded data
+        if (!this.anomalyData || this.anomalyData.length === 0) {
+            this.referenceData = [];
+            return;
+        }
+
+        // Detect if we should use actual joint numbers or calculate from distance
+        // Original data: joint ≈ distance/40 (e.g., joint 12230 at distance 489200ft)
+        // Uploaded data: joint is identifier (e.g., joint 75 at distance 125ft)
+        const sample = this.anomalyData.find(a => {
+            const joint = a.joint_number || a.joint_22 || a.joint;
+            const dist = a.dist_22_aligned || a.distance || a.dist_22;
+            return joint != null && dist != null;
+        });
+
+        let useActualJoints = false;
+        if (sample) {
+            const joint = sample.joint_number || sample.joint_22 || sample.joint;
+            const dist = sample.dist_22_aligned || sample.distance || sample.dist_22;
+            const calculatedJoint = Math.floor(dist / 40);
+            // If joint number differs significantly from dist/40, use actual joint numbers
+            useActualJoints = Math.abs(joint - calculatedJoint) > 10;
+        }
+
+        if (useActualJoints) {
+            // UPLOADED DATA MODE: Use actual joint numbers
+            const jointDistances = new Map();
+
+            this.anomalyData.forEach(a => {
+                const jointNum = a.joint_number || a.joint_22 || a.joint;
+                const dist = a.dist_22_aligned || a.distance || a.dist_22;
+
+                if (jointNum != null && dist != null) {
+                    if (!jointDistances.has(jointNum)) {
+                        jointDistances.set(jointNum, []);
+                    }
+                    jointDistances.get(jointNum).push(dist);
+                }
+            });
+
+            const joints = [];
+            jointDistances.forEach((distances, jointNum) => {
+                const avgDist = distances.reduce((sum, d) => sum + d, 0) / distances.length;
+                joints.push({
+                    type: 'Girth Weld',
+                    dist_22: avgDist - 20, // Center the pipe on the anomalies
+                    dist: avgDist - 20,
+                    joint: jointNum
+                });
+            });
+
+            joints.sort((a, b) => a.dist_22 - b.dist_22);
+            this.referenceData = joints;
+            console.log(`✓ Generated ${joints.length} joints from ACTUAL joint numbers (uploaded data)`);
+
+        } else {
+            // ORIGINAL DATA MODE: Calculate joints at 40ft intervals
+            const distances = this.anomalyData.map(a => a.dist_22_aligned || a.distance || a.dist_22).filter(d => d != null);
+            const minDist = Math.min(...distances);
+            const maxDist = Math.max(...distances);
+
+            const jointLength = 40;
+            const joints = [];
+
+            for (let dist = Math.floor(minDist / jointLength) * jointLength; dist <= maxDist; dist += jointLength) {
+                joints.push({
+                    type: 'Girth Weld',
+                    dist_22: dist - 20, // Shift back 20ft to center on anomalies
+                    dist: dist - 20,
+                    joint: Math.floor(dist / jointLength)
+                });
+            }
+
+            this.referenceData = joints;
+            console.log(`✓ Generated ${joints.length} joints at 40ft intervals (original data)`);
+        }
+    }
+
+    clearVisualization() {
+        // Clear existing 3D objects
+        this.anomalies.forEach(mesh => {
+            this.scene.remove(mesh);
+            if (mesh.geometry) mesh.geometry.dispose();
+            if (mesh.material) mesh.material.dispose();
+        });
+        this.anomalies = [];
+
+        this.pipeSegments.forEach(segment => {
+            this.scene.remove(segment);
+            if (segment.geometry) segment.geometry.dispose();
+            if (segment.material) segment.material.dispose();
+        });
+        this.pipeSegments = [];
+
+        this.featureMarkers.forEach(marker => {
+            this.scene.remove(marker);
+            if (marker.geometry) marker.geometry.dispose();
+            if (marker.material) marker.material.dispose();
+        });
+        this.featureMarkers = [];
+
+        // Clear maps
+        this.jointMap.clear();
+        this.jointAnomalyMap.clear();
+
+        // Remove labels
+        this.removeJointLabels();
+
+        console.log('Visualization cleared');
+    }
 }
+
 
 new PipelineViewer();
