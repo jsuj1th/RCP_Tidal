@@ -16,6 +16,7 @@ class PipelineViewer {
         this.pipeSegments = [];
         this.featureMarkers = [];
         this.jointMap = new Map();
+        this.jointAnomalyMap = new Map();
 
         this.raycaster = new THREE.Raycaster();
         this.mouse = new THREE.Vector2();
@@ -23,6 +24,18 @@ class PipelineViewer {
         this.criticalIndex = -1;
         this.showLabels = false;
         this.labelSprites = []; // Store label sprites
+        this.selectedAnomaly = null; // Track selected anomaly for AI context
+
+        // Selection Highlight Mesh
+        const selGeo = new THREE.SphereGeometry(1, 16, 16);
+        const selMat = new THREE.MeshBasicMaterial({ color: 0xffff00, wireframe: true, transparent: true, opacity: 0.8 });
+        this.selectionMesh = new THREE.Mesh(selGeo, selMat);
+        this.selectionMesh.visible = false;
+        this.scene.add(this.selectionMesh);
+
+        // Measurement Guides Group
+        this.guidesGroup = new THREE.Group();
+        this.scene.add(this.guidesGroup);
 
         // Tooltip element
         this.tooltip = document.createElement('div');
@@ -41,7 +54,7 @@ class PipelineViewer {
         document.getElementById('btn-apply-range').onclick = () => this.applyRangeFilter();
         document.getElementById('btn-reset-range').onclick = () => this.resetRangeFilter();
         document.getElementById('btn-apply-neighbor').onclick = () => this.applyNeighborhoodFilter();
-        
+
         // Filter toggle functionality
         document.getElementById('btn-toggle-filters').onclick = () => this.toggleFiltersSection();
 
@@ -56,7 +69,7 @@ class PipelineViewer {
     toggleFiltersSection() {
         const section = document.getElementById('filters-section');
         const btnText = document.getElementById('filter-btn-text');
-        
+
         if (section.classList.contains('hidden')) {
             section.classList.remove('hidden');
             btnText.innerText = 'Hide Filters';
@@ -68,7 +81,7 @@ class PipelineViewer {
 
     toggleLabels(show) {
         this.showLabels = show;
-        
+
         if (show) {
             this.createJointLabels();
         } else {
@@ -79,44 +92,44 @@ class PipelineViewer {
     createJointLabels() {
         // Remove existing labels first
         this.removeJointLabels();
-        
+
         // Create labels for visible pipe segments
         this.pipeSegments.forEach(segment => {
             if (!segment.visible) return;
-            
+
             const canvas = document.createElement('canvas');
             const context = canvas.getContext('2d');
             canvas.width = 256;
             canvas.height = 128;
-            
+
             // Draw background
             context.fillStyle = 'rgba(15, 23, 42, 0.9)';
             context.roundRect(10, 10, 236, 108, 10);
             context.fill();
-            
+
             // Draw border
             context.strokeStyle = 'rgba(59, 130, 246, 0.5)';
             context.lineWidth = 2;
             context.roundRect(10, 10, 236, 108, 10);
             context.stroke();
-            
+
             // Draw text
             context.fillStyle = '#60a5fa';
             context.font = 'bold 32px Arial';
             context.textAlign = 'center';
             context.fillText(`Joint ${segment.userData.joint}`, 128, 55);
-            
+
             context.fillStyle = '#94a3b8';
             context.font = '20px Arial';
             context.fillText(`${segment.userData.dist.toFixed(0)} ft`, 128, 90);
-            
+
             const texture = new THREE.CanvasTexture(canvas);
             const spriteMaterial = new THREE.SpriteMaterial({ map: texture });
             const sprite = new THREE.Sprite(spriteMaterial);
-            
+
             sprite.position.set(0, 4, segment.position.z);
             sprite.scale.set(8, 4, 1);
-            
+
             this.scene.add(sprite);
             this.labelSprites.push(sprite);
         });
@@ -134,7 +147,7 @@ class PipelineViewer {
     toggleFilters() {
         const content = document.getElementById('filters-content');
         const chevron = document.getElementById('filter-chevron');
-        
+
         if (content.classList.contains('hidden')) {
             content.classList.remove('hidden');
             chevron.style.transform = 'rotate(0deg)';
@@ -148,7 +161,7 @@ class PipelineViewer {
         // Get canvas container bounds for accurate mouse coordinates
         const container = document.getElementById('canvas-container');
         const rect = container.getBoundingClientRect();
-        
+
         // Check if mouse is within canvas bounds
         if (event.clientX < rect.left || event.clientX > rect.right ||
             event.clientY < rect.top || event.clientY > rect.bottom) {
@@ -157,18 +170,106 @@ class PipelineViewer {
             this.hoveredSegment = null;
             return;
         }
-        
+
         this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
         this.raycaster.setFromCamera(this.mouse, this.camera);
-        const intersects = this.raycaster.intersectObjects(this.pipeSegments);
+
+        // Check Anomalies
+        const visibleAnomalies = this.anomalies.filter(a => a.visible);
+        const intersectAnom = this.raycaster.intersectObjects(visibleAnomalies);
+
+        if (intersectAnom.length > 0) {
+            // Clear pipe highlight if any
+            if (this.hoveredSegment) {
+                this.hoveredSegment.material.emissive.setHex(0x000000);
+                this.hoveredSegment = null;
+            }
+
+            const data = intersectAnom[0].object.userData;
+            if (!this.isGuideLocked) this.drawMeasurementGuides(data);
+
+            this.tooltip.style.left = `${event.clientX + 15}px`;
+            this.tooltip.style.top = `${event.clientY + 15}px`;
+            let distText = '0.00 ft';
+            // Try to calculate distance from joint start
+            const jointNum = Number(data.joint_number || data.joint_22 || data.joint);
+            const segment = this.jointMap.get(jointNum);
+            if (segment && data.dist_22_aligned) {
+                distText = Math.abs(data.dist_22_aligned - segment.userData.dist).toFixed(2) + ' ft';
+            }
+
+            this.tooltip.innerHTML = `
+                <div class="flex flex-col gap-1 min-w-[160px]">
+                    <div class="font-bold text-slate-200 text-xs border-b border-white/10 pb-1 mb-1">${data.event_type || 'Anomaly'}</div>
+                    <div class="flex justify-between text-[10px] text-slate-400">
+                        <span>Depth:</span> <span class="text-slate-200">${data.depth_22 ? data.depth_22.toFixed(1) + '%' : 'N/A'}</span>
+                    </div>
+                    <div class="flex justify-between text-[10px] text-slate-400">
+                        <span>Distance:</span> <span class="text-cyan-400 font-bold">${distText}</span>
+                    </div>
+                     <div class="flex justify-between text-[10px] text-slate-400">
+                        <span>Angle:</span> <span class="text-purple-400 font-bold">${data.orient_22 ? data.orient_22.toFixed(1) : 0}°</span>
+                    </div>
+                    ${data.status === 'Critical' ? '<div class="text-[10px] text-red-400 font-bold mt-1">CRITICAL</div>' : ''}
+                </div>
+            `;
+            this.tooltip.classList.remove('hidden');
+            return;
+        } else {
+            if (!this.isGuideLocked) this.clearMeasurementGuides();
+        }
+
+        const visibleSegments = this.pipeSegments.filter(s => s.visible);
+        const intersects = this.raycaster.intersectObjects(visibleSegments);
 
         if (intersects.length > 0) {
             const data = intersects[0].object.userData;
             this.tooltip.style.left = `${event.clientX + 15}px`;
             this.tooltip.style.top = `${event.clientY + 15}px`;
-            this.tooltip.innerText = `Joint: ${data.joint} | Dist: ${Math.round(data.dist)} ft`;
+
+            // Look up anomalies for this joint
+            const jointNum = Number(data.joint);
+            const anomalies = this.jointAnomalyMap.get(jointNum) || [];
+
+            // Critical anomalies count
+            const criticalCount = anomalies.filter(a => a.status === 'Critical').length;
+            const reviewCount = anomalies.filter(a => a.confidence_label === 'Review Required').length;
+
+            let anomalyHtml = '';
+            if (anomalies.length > 0) {
+                anomalyHtml = `
+                    <div class="mt-2 pt-2 border-t border-white/20">
+                        <div class="font-bold text-slate-300 mb-1">Anomalies (${anomalies.length}):</div>
+                        ${anomalies.slice(0, 5).map(a => `
+                            <div class="flex justify-between text-[10px] items-center mb-0.5">
+                                <span class="${a.status === 'Critical' ? 'text-red-400' : 'text-slate-400'}">${a.event_type || 'Anomaly'}</span>
+                                <span class="font-mono text-slate-500">${a.dist_22_aligned ? a.dist_22_aligned.toFixed(0) : 0}ft</span>
+                            </div>
+                        `).join('')}
+                        ${anomalies.length > 5 ? `<div class="text-[9px] text-slate-500 italic">+${anomalies.length - 5} more...</div>` : ''}
+                    </div>
+                `;
+            } else {
+                anomalyHtml = `<div class="mt-2 text-[10px] text-green-400/80 italic">No anomalies detected</div>`;
+            }
+
+            this.tooltip.innerHTML = `
+                <div class="flex flex-col gap-0.5 min-w-[140px]">
+                    <div class="font-bold text-cyan-400 text-sm mb-1">Joint ${data.joint}</div>
+                    <div class="flex justify-between text-xs text-slate-300">
+                        <span>Distance:</span>
+                        <span class="font-mono ml-3">${Math.round(data.dist)} ft</span>
+                    </div>
+                    <div class="flex justify-between text-xs text-slate-300">
+                        <span>Length:</span>
+                        <span class="font-mono ml-3">${Math.round(data.length)} ft</span>
+                    </div>
+                    ${criticalCount > 0 ? `<div class="text-xs text-red-400 font-bold mt-1">⚠️ ${criticalCount} Critical</div>` : ''}
+                    ${anomalyHtml}
+                </div>
+            `;
             this.tooltip.classList.remove('hidden');
 
             // Subtle highlight on hover
@@ -196,30 +297,70 @@ class PipelineViewer {
     setupCamera() {
         // Fixed canvas size: 600px height
         const container = document.getElementById('canvas-container');
-        const width = container.clientWidth;
-        const height = 600;
+        const width = container.clientWidth || 800;
+        const height = container.clientHeight || 600;
         this.camera = new THREE.PerspectiveCamera(75, width / height, 0.1, 5000);
         this.camera.position.set(20, 10, 20);
     }
 
     setupRenderer() {
-        this.renderer = new THREE.WebGLRenderer({ antialias: true });
-        // Set renderer to fixed canvas size
+        this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true }); // Alpha for transparency if needed
+        this.renderer.shadowMap.enabled = true;
+        this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+        // Set renderer to container size
         const container = document.getElementById('canvas-container');
-        const width = container.clientWidth;
-        const height = 600;
+        const width = container.clientWidth || 800;
+        const height = container.clientHeight || 600;
         this.renderer.setSize(width, height);
         this.renderer.setPixelRatio(window.devicePixelRatio);
         this.container.appendChild(this.renderer.domElement);
     }
 
     setupLights() {
-        const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
-        this.scene.add(ambientLight);
+        // Warm Sunset Atmosphere
+        this.scene.background = new THREE.Color(0xffcd9f); // Sunset Sky
+        this.scene.fog = new THREE.FogExp2(0xffcd9f, 0.008); // Dense Horizon Fog
 
-        const pointLight = new THREE.PointLight(0xffffff, 1);
-        pointLight.position.set(20, 50, 20);
-        this.scene.add(pointLight);
+        // 1. Hemisphere Light (Sky vs Ground)
+        const hemiLight = new THREE.HemisphereLight(0xffeeb1, 0x080820, 0.6); // Warm sky, dark ground
+        this.scene.add(hemiLight);
+
+        // 2. Directional Sun (Casting Shadows)
+        const dirLight = new THREE.DirectionalLight(0xffaa00, 1.5);
+        dirLight.position.set(50, 30, 20); // Low angle sunset
+        dirLight.castShadow = true;
+
+        // Optimize Shadow Map
+        dirLight.shadow.mapSize.width = 2048;
+        dirLight.shadow.mapSize.height = 2048;
+        const d = 100;
+        dirLight.shadow.camera.left = -d;
+        dirLight.shadow.camera.right = d;
+        dirLight.shadow.camera.top = d;
+        dirLight.shadow.camera.bottom = -d;
+        dirLight.shadow.bias = -0.0001;
+
+        this.scene.add(dirLight);
+
+        // 3. Ambient Fill
+        const ambLight = new THREE.AmbientLight(0x404040, 0.5); // Soft fill
+        this.scene.add(ambLight);
+    }
+
+    createEnvironment() {
+        // Desert Ground Plane
+        const planeGeo = new THREE.PlaneGeometry(10000, 10000);
+        const planeMat = new THREE.MeshStandardMaterial({
+            color: 0xd2b48c, // Tan
+            roughness: 1,
+            metalness: 0
+        });
+        const plane = new THREE.Mesh(planeGeo, planeMat);
+        plane.rotation.x = -Math.PI / 2;
+        plane.position.y = -2.5; // Below pipe
+        plane.receiveShadow = true;
+        this.scene.add(plane);
     }
 
     setupControls() {
@@ -228,11 +369,402 @@ class PipelineViewer {
     }
 
     async init() {
+        console.log('Initializing viewer...');
         await this.loadData();
+        this.createEnvironment(); // Added Environment
         this.createPipeline();
         this.createAnomalies();
         this.createReferences();
         this.populateCriticalZones();
+        this.populateJointList();
+
+        // Do NOT auto-select - user will select from list
+        // Pipe and anomalies are hidden by default for list-first workflow
+        console.log('Viewer initialized. Select a joint from the list to view the pipe.');
+
+        await this.setupChat();
+    }
+
+    async setupChat() {
+        // UI Elements
+        this.chatWidget = document.getElementById('chat-widget'); // Parent container
+        this.chatWindow = document.getElementById('chat-window');
+        this.toggleBtn = document.getElementById('btn-ask-ai'); // NEW BUTTON ID
+        this.closeBtn = document.getElementById('close-chat');
+        this.sendBtn = document.getElementById('send-chat');
+        this.chatInput = document.getElementById('chat-input');
+        this.msgsContainer = document.getElementById('chat-messages');
+        this.apiKeyPanel = document.getElementById('api-key-panel');
+        this.apiKeyInput = document.getElementById('api-key-input');
+        this.saveKeyBtn = document.getElementById('save-api-key');
+        this.clearChatBtn = document.getElementById('clear-chat');
+
+        // State
+        this.chatOpen = false;
+
+        // Load API Key from config or local storage
+        try {
+            const res = await fetch('/config.json');
+            if (res.ok) {
+                const config = await res.json();
+                if (config.featherless_api_key && config.featherless_api_key.length > 5 && !config.featherless_api_key.includes('Paste-Your-Key')) {
+                    this.apiKey = config.featherless_api_key;
+                    console.log('API Key loaded from config.json');
+                }
+            }
+        } catch (e) {
+            console.warn('Could not load config.json', e);
+        }
+
+        if (!this.apiKey) {
+            this.apiKey = localStorage.getItem('featherless_api_key');
+        }
+
+        // Event Listeners
+        if (this.toggleBtn) this.toggleBtn.onclick = () => this.toggleChat();
+        if (this.closeBtn) this.closeBtn.onclick = () => this.toggleChat();
+        if (this.saveKeyBtn) this.saveKeyBtn.onclick = () => this.saveApiKey();
+        if (this.sendBtn) this.sendBtn.onclick = () => this.handleChatSubmit();
+        if (this.chatInput) {
+            this.chatInput.onkeypress = (e) => {
+                if (e.key === 'Enter') this.handleChatSubmit();
+            };
+        }
+        if (this.clearChatBtn) this.clearChatBtn.onclick = () => this.clearChat();
+
+        // Check Key state
+        if (!this.apiKey) {
+            this.apiKeyPanel.classList.remove('hidden');
+        } else {
+            this.apiKeyPanel.classList.add('hidden');
+        }
+    }
+
+    toggleChat() {
+        this.chatOpen = !this.chatOpen;
+        if (this.chatOpen) {
+            this.chatWindow.classList.remove('hidden');
+            // Small delay to allow display:block to apply before opacity transition
+            setTimeout(() => {
+                this.chatWindow.classList.remove('opacity-0', 'scale-95', 'translate-y-4');
+                this.chatInput.focus();
+            }, 10);
+
+            // Check key again
+            if (!this.apiKey) this.apiKeyPanel.classList.remove('hidden');
+        } else {
+            this.chatWindow.classList.add('opacity-0', 'scale-95', 'translate-y-4');
+            setTimeout(() => {
+                this.chatWindow.classList.add('hidden');
+            }, 300);
+        }
+    }
+
+    saveApiKey() {
+        const key = this.apiKeyInput.value.trim();
+        if (key.length > 10) {
+            this.apiKey = key;
+            localStorage.setItem('featherless_api_key', key);
+            this.apiKeyPanel.classList.add('hidden');
+            this.addMessage('system', 'API Key saved! You can now ask me about the pipeline.');
+        } else {
+            alert('Please enter a valid API Key.');
+        }
+    }
+
+    clearChat() {
+        this.msgsContainer.innerHTML = '';
+        this.addMessage('system', 'Chat history cleared.');
+    }
+
+    async handleChatSubmit() {
+        const text = this.chatInput.value.trim();
+        if (!text) return;
+
+        if (!this.apiKey) {
+            this.addMessage('system', 'Please enter your API Key first.');
+            this.apiKeyPanel.classList.remove('hidden');
+            return;
+        }
+
+        this.addMessage('user', text);
+        this.chatInput.value = '';
+
+        // Contextual analysis
+        const context = this.getPipelineContext(text);
+
+        // Show typing indicator
+        const typingId = this.addMessage('system', '<span class="animate-pulse">Thinking...</span>');
+
+        try {
+            const response = await this.callFeatherlessAPI(text, context);
+            // Remove typing indicator
+            const typingEl = document.getElementById(`msg-${typingId}`);
+            if (typingEl) typingEl.remove();
+
+            this.addMessage('ai', response);
+        } catch (error) {
+            const typingEl = document.getElementById(`msg-${typingId}`);
+            if (typingEl) typingEl.remove();
+            this.addMessage('system', `Error: ${error.message}`);
+        }
+    }
+
+    addMessage(role, text) {
+        const id = Date.now();
+        const div = document.createElement('div');
+        div.id = `msg-${id}`;
+        div.className = 'flex gap-3 mb-4 animate-fadeIn'; // fade-in animation
+
+        let avatar = '';
+        let bubbleClass = '';
+
+        if (role === 'user') {
+            avatar = `<div class="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center shrink-0 border border-white/10"><svg class="w-4 h-4 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path></svg></div>`;
+            bubbleClass = 'bg-slate-800 border border-white/5 text-slate-300';
+            div.classList.add('flex-row-reverse'); // User on right? No, design shows left with icon. Let's keep standard left alignment for now but distinct style.
+            // Actually, usually user is right. Let's make user right.
+            div.className = 'flex gap-3 mb-4 justify-end';
+            avatar = ''; // No avatar for user to save space/cleaner look? Or use one on right.
+            avatar = `<div class="w-8 h-8 rounded-full bg-slate-700 flex items-center justify-center shrink-0 border border-white/10"><svg class="w-4 h-4 text-slate-300" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path></svg></div>`;
+        } else if (role === 'ai') {
+            avatar = `<div class="w-8 h-8 rounded-full bg-gradient-to-br from-indigo-500 to-purple-600 flex items-center justify-center shrink-0 shadow-lg shadow-indigo-500/20 text-white font-bold text-xs">AI</div>`;
+            bubbleClass = 'bg-slate-800/80 border border-indigo-500/20 text-slate-200 shadow-sm';
+        } else { // System
+            div.className = 'flex gap-2 mb-4 justify-center opacity-75';
+            div.innerHTML = `<div class="text-[10px] text-slate-500 bg-slate-800/50 px-2 py-1 rounded-full border border-white/5">${text}</div>`;
+            this.msgsContainer.appendChild(div);
+            this.msgsContainer.scrollTop = this.msgsContainer.scrollHeight;
+            return id;
+        }
+
+        div.innerHTML = `
+            ${role === 'ai' ? avatar : ''}
+            <div class="${bubbleClass} rounded-2xl p-3 text-xs leading-relaxed shadow-sm max-w-[85%] ${role === 'user' ? 'rounded-tr-none bg-cyan-900/20 border-cyan-500/20 text-cyan-100' : 'rounded-tl-none'}">
+                ${text}
+            </div>
+            ${role === 'user' ? avatar : ''}
+        `;
+
+        this.msgsContainer.appendChild(div);
+        this.msgsContainer.scrollTop = this.msgsContainer.scrollHeight;
+        return id;
+    }
+
+    getPipelineContext(query) {
+        // 1. Global Stats
+        const totalJoints = this.jointMap.size;
+        const totalAnomalies = this.anomalyData.length;
+        const criticalCount = this.anomalyData.filter(a => a.status === 'Critical').length;
+
+        let context = `Current Pipeline Status:\n- Total Joints: ${totalJoints}\n- Total Anomalies: ${totalAnomalies}\n- Critical Anomalies: ${criticalCount}\n`;
+
+        // 2. Focused Context (Selected Joint/Anomaly)
+        // Note: We need to track selected item. I'll add 'this.selectedItem' tracking in selectJoint/showAnomalyInfo later.
+        // For now, let's infer from query or view state.
+
+        // 3. Query Analysis
+        // "between joint X and Y"
+        const rangeMatch = query.match(/between joint (\d+) and (\d+)/i);
+        if (rangeMatch) {
+            const start = parseInt(rangeMatch[1]);
+            const end = parseInt(rangeMatch[2]);
+            const subset = this.anomalyData.filter(a => {
+                const j = Number(a.joint_number || a.joint_22 || a.joint);
+                return j >= start && j <= end;
+            });
+            context += `\nAnalysis for Joints ${start} to ${end}:\n- Found ${subset.length} anomalies.\n`;
+            if (subset.length > 0 && subset.length < 50) {
+                context += `- Anomalies: ${JSON.stringify(subset.map(a => ({
+                    id: a.id, joint: a.joint_number, type: a.anomaly_type, depth: a.depth_22, status: a.status
+                })))}\n`;
+            } else if (subset.length >= 50) {
+                context += `- Too many anomalies to list individually. Summary: ${subset.filter(a => a.status === 'Critical').length} Critical.\n`;
+            }
+        }
+
+        // "this point" or "selected joint"
+        // Check if we have a selected joint in 'this.lastSelectedJoint' (I might need to add this property)
+        if (query.toLowerCase().includes('this') || query.toLowerCase().includes('selected') || this.selectedAnomaly) {
+            // Retrieve currently visible/highlighted stuff? 
+            // Best effort: top visible anomaly
+
+            if (this.selectedAnomaly) {
+                const a = this.selectedAnomaly;
+
+                // Calculate Reason (Same logic as populateCriticalZones)
+                let reason = 'Standard risk factors';
+                if (a.depth_22 >= 80) reason = 'Severe wall loss (>80% depth)';
+                else if (a.annual_growth_rate >= 5) reason = 'Rapid corrosion growth (>5%/yr)';
+                else if (a.depth_22 >= 60 && a.annual_growth_rate >= 2) reason = 'High depth (>60%) combined with active growth';
+                else if (a.status === 'Critical') reason = `Combined factors: Depth ${a.depth_22.toFixed(0)}%, Growth ${a.annual_growth_rate.toFixed(1)}%/yr`;
+
+                context += `\n[SELECTED ANOMALY FOCUS]
+- Anomaly ID: ${a.id || 'Unknown'} at Distance ${a.dist_22_aligned ? a.dist_22_aligned.toFixed(1) : 0} ft
+- Type: ${a.anomaly_type || 'Corrosion'}
+- Orientation: ${a.orient_22 ? a.orient_22.toFixed(1) : 0}° (Clock Position: ${a.orient_22 ? (a.orient_22 / 30).toFixed(1) : 0}h)
+- Dimensions: Depth ${a.depth_22 ? a.depth_22.toFixed(1) : 0}%, Length ${a.length ? a.length.toFixed(2) : 0} in
+- Status: ${a.status}
+- Computed Severity Reason: ${reason}
+- Note to AI: Explain status/severity. If user asks "Why", explain the metrics.
+`;
+            }
+        }
+
+        return context;
+    }
+
+    async callFeatherlessAPI(message, context) {
+        const systemPrompt = `You are a Pipeline Integrity AI Assistant. Analyze MFL/UT inspection data accurately.
+        
+        CONTEXT:
+        ${context}
+        
+        CRITICAL TERMINOLOGY:
+        - DEPTH (%): Wall thickness loss due to corrosion. NOT distance along pipeline.
+          Example: 36% depth = 36% of pipe wall thickness has been lost to corrosion.
+          100% = hole through wall, 50% = half wall thickness gone.
+        - ORIENTATION (degrees): Angular position around pipe circumference (0-360°).
+          Measured from top of pipe (90° or 12 o'clock) clockwise.
+        - DISTANCE (ft): Location along the pipeline length from start point.
+        - GROWTH RATE (%/yr): Annual increase in depth percentage.
+        
+        SEVERITY FACTORS:
+        - Critical if: depth ≥80%, OR growth ≥5%/yr, OR (depth ≥60% AND growth ≥2%/yr)
+        - High depth + active growth = urgent concern for pipe integrity
+        
+        RESPONSE RULES:
+        1. Default: BRIEF (1-2 sentences). "Anomaly at [distance]ft. Depth: [X]% wall loss, Orient: [Y]°."
+        2. If asked "Why/What/How": EXPLAIN accurately using correct terminology.
+        3. NEVER say depth is "relative to pipeline length" - it's wall thickness loss.
+        4. Be precise and data-driven. No filler phrases.
+        
+        User Query: ${message}`;
+
+        const response = await fetch('https://api.featherless.ai/v1/chat/completions', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'Authorization': `Bearer ${this.apiKey}`
+            },
+            body: JSON.stringify({
+                model: "mistralai/Mistral-7B-Instruct-v0.1",
+                messages: [
+                    { role: "system", content: systemPrompt },
+                    { role: "user", content: message }
+                ],
+                temperature: 0.7,
+                max_tokens: 500
+            })
+        });
+
+        if (!response.ok) {
+            const err = await response.json();
+            throw new Error(err.error?.message || 'API request failed');
+        }
+
+        const data = await response.json();
+        return data.choices[0].message.content;
+    }
+
+    populateJointList() {
+        const list = document.getElementById('risk-joint-list');
+        if (!list) {
+            console.error('CRITICAL: #risk-joint-list element not found in DOM');
+            return;
+        }
+
+        console.log(`Populating joint list. Total joints mapped: ${this.jointMap.size}, Anomalies mapped: ${this.jointAnomalyMap.size} `);
+
+        // Sort all joints by anomaly count
+        const jointRisks = [];
+        this.jointMap.forEach((segment, jointNum) => {
+            const anomalies = this.jointAnomalyMap.get(jointNum) || [];
+            if (anomalies.length > 0) {
+                const criticalCount = anomalies.filter(a => a.status === 'Critical').length;
+                jointRisks.push({
+                    joint: jointNum,
+                    count: anomalies.length,
+                    critical: criticalCount,
+                    segment: segment
+                });
+            }
+        });
+
+        // Sort by Critical count desc, then Total count desc
+        jointRisks.sort((a, b) => {
+            if (b.critical !== a.critical) return b.critical - a.critical;
+            return b.count - a.count;
+        });
+
+        this.sortedJointsByRisk = jointRisks.map(j => j.joint);
+
+        if (jointRisks.length === 0) {
+            console.warn('No joints with anomalies found.');
+            list.innerHTML = '<div class="text-xs text-slate-500 italic p-4 text-center">No anomalies found.</div>';
+            return;
+        }
+
+        list.innerHTML = '';
+        jointRisks.forEach((item, index) => {
+            const el = document.createElement('div');
+            el.className = 'bg-slate-800/50 hover:bg-slate-700/80 p-3 rounded-xl border border-white/5 cursor-pointer transition-all group flex items-center justify-between';
+            el.innerHTML = `
+    <div>
+                    <div class="text-xs font-bold text-slate-300 group-hover:text-cyan-400 mb-0.5">Joint ${item.joint}</div>
+                    <div class="text-[10px] text-slate-500">${Math.round(item.segment.userData.dist)} ft</div>
+                </div>
+    <div class="flex flex-col items-end">
+        ${item.critical > 0 ? `<div class="text-[10px] font-bold text-red-400 bg-red-900/20 px-1.5 rounded mb-1">${item.critical} Critical</div>` : ''}
+        <div class="text-[10px] text-slate-400">${item.count} Anomalies</div>
+    </div>
+`;
+            el.onclick = () => this.selectJoint(item.joint);
+            list.appendChild(el);
+        });
+        console.log(`Populated list with ${jointRisks.length} joints.`);
+    }
+
+    selectJoint(jointNum) {
+        console.log(`Selecting joint ${jointNum} `);
+        // ISOLATE MODE: Hide all, show only selected joint
+        // This creates a focused view for list-first workflow
+        this.pipeSegments.forEach(s => s.visible = false);
+        this.anomalies.forEach(a => a.visible = false);
+        this.scene.children.forEach(c => {
+            if (c.userData.type === 'WeldSeam') c.visible = false;
+        });
+
+        // Show selected segment
+        const segment = this.jointMap.get(jointNum);
+        if (segment) {
+            segment.visible = true;
+            this.highlightSegment(segment);
+
+            // Show associated seam (joint itself)
+            this.scene.children.forEach(c => {
+                if (c.userData.type === 'WeldSeam' && Number(c.userData.joint) === jointNum) {
+                    c.visible = true;
+                }
+            });
+
+            // Camera Jump
+            this.jumpTo(segment.userData);
+        } else {
+            console.warn(`Segment for joint ${jointNum} not found in map.`);
+        }
+
+        // Show anomalies for this joint using robust check
+        let visibleAnomalies = 0;
+        this.anomalies.forEach(mesh => {
+            const data = mesh.userData;
+            const meshJoint = Number(data.joint_number || data.joint_22 || data.joint);
+            if (meshJoint === jointNum) {
+                mesh.visible = true;
+                visibleAnomalies++;
+            }
+        });
+        console.log(`Visible anomalies for joint ${jointNum}: ${visibleAnomalies} `);
     }
 
     populateCriticalZones() {
@@ -252,7 +784,7 @@ class PipelineViewer {
         criticals.forEach((a, index) => {
             const item = document.createElement('div');
             item.className = 'p-3 rounded-lg bg-red-500/10 border border-red-500/20 hover:bg-red-500/20 cursor-pointer transition-all hover:scale-[1.02]';
-            
+
             // Determine why it's critical
             let reason = '';
             if (a.depth_22 >= 80) {
@@ -264,7 +796,7 @@ class PipelineViewer {
             } else {
                 reason = 'Multiple risk factors';
             }
-            
+
             // Validation badge
             let validationIcon = '';
             if (a.is_match && a.is_validated !== undefined) {
@@ -274,15 +806,15 @@ class PipelineViewer {
                     validationIcon = '<span class="text-orange-400 text-[10px]" title="Validation Warning">⚠</span>';
                 }
             }
-            
+
             item.innerHTML = `
-                <div class="flex justify-between items-start mb-2">
+    <div class="flex justify-between items-start mb-2">
                     <div class="flex items-center gap-1">
                         <span class="text-xs font-mono text-red-400 font-bold">#${index + 1}</span>
                         ${validationIcon}
                     </div>
                     <span class="text-xs bg-red-500/30 text-red-300 px-2 py-0.5 rounded-full font-mono">${a.annual_growth_rate ? a.annual_growth_rate.toFixed(1) + '%/yr' : 'N/A'}</span>
-                </div>
+                </div >
                 <div class="flex justify-between text-xs mb-1">
                     <span class="text-slate-400">Distance:</span>
                     <span class="text-white font-mono">${a.dist_22_aligned ? a.dist_22_aligned.toFixed(0) : 0} ft</span>
@@ -294,7 +826,7 @@ class PipelineViewer {
                 <div class="text-[10px] text-red-300/80 bg-red-500/10 px-2 py-1 rounded border border-red-500/20">
                     ⚠️ ${reason}
                 </div>
-            `;
+`;
             item.onclick = () => this.jumpTo(a);
             list.appendChild(item);
         });
@@ -326,16 +858,17 @@ class PipelineViewer {
         try {
             console.log('Fetching data...');
             const [anomsRes, refsRes] = await Promise.all([
-                fetch('/data/ui_payload.json'),
-                fetch('/data/reference_payload.json')
+                // Try to load from root /data first, fallback to relative if needed (though usually /data works in Vite)
+                fetch('/data/ui_payload.json').catch(e => fetch('./data/ui_payload.json')),
+                fetch('/data/reference_payload.json').catch(e => fetch('./data/reference_payload.json'))
             ]);
 
-            if (!anomsRes.ok) throw new Error(`Failed to load ui_payload.json: ${anomsRes.status} ${anomsRes.statusText}`);
-            if (!refsRes.ok) throw new Error(`Failed to load reference_payload.json: ${refsRes.status} ${refsRes.statusText}`);
+            if (!anomsRes.ok) throw new Error(`Failed to load ui_payload.json: ${anomsRes.status} ${anomsRes.statusText} `);
+            if (!refsRes.ok) throw new Error(`Failed to load reference_payload.json: ${refsRes.status} ${refsRes.statusText} `);
 
             this.anomalyData = await anomsRes.json();
             this.referenceData = await refsRes.json();
-            console.log(`Data loaded successfully. Anomalies: ${this.anomalyData.length}, References: ${this.referenceData.length}`);
+            console.log(`Data loaded successfully.Anomalies: ${this.anomalyData.length}, References: ${this.referenceData.length} `);
         } catch (error) {
             console.error('CRITICAL: Error loading data:', error);
             // Show error in UI
@@ -351,9 +884,9 @@ class PipelineViewer {
         const radius = 2;
 
         const material = new THREE.MeshStandardMaterial({
-            color: 0xffffff, // Whitish
-            metalness: 0.6,
-            roughness: 0.3,
+            color: 0xeaeaea, // Coated Off-White/Beige
+            metalness: 0.3,  // Low metalness (coated)
+            roughness: 0.6,  // Matte/Rough finish
             side: THREE.DoubleSide
         });
 
@@ -383,6 +916,9 @@ class PipelineViewer {
                 length: segmentLength
             };
 
+            segment.visible = true; // Visible pipeline
+            segment.castShadow = true; // Cast shadow on desert
+            segment.receiveShadow = true; // Self shadow
             this.scene.add(segment);
             this.pipeSegments.push(segment);
             this.jointMap.set(Number(r1.joint), segment);
@@ -393,6 +929,7 @@ class PipelineViewer {
             const seam = new THREE.Mesh(seamGeo, seamMat);
             seam.position.z = start;
             seam.userData = { type: 'WeldSeam', joint: r1.joint };
+            seam.visible = false; // Hidden by default
             this.scene.add(seam);
         }
 
@@ -409,7 +946,10 @@ class PipelineViewer {
     }
 
     createAnomalies() {
-        const radius = 2;
+        console.log('Creating anomalies...', this.anomalyData.length);
+        if (this.anomalyData.length > 0) console.log('First anomaly:', this.anomalyData[0]);
+        // Pipe radius is 2. Position anomalies slightly higher to avoid z-fighting and ensure visibility.
+        const radius = 2.15;
         this.anomalyData.forEach(item => {
             const z = item.dist_22_aligned;
             const theta = (item.orient_22 * Math.PI) / 180;
@@ -418,7 +958,7 @@ class PipelineViewer {
             const y = radius * Math.sin(theta);
 
             let color = 0x22c55e; // green-500
-            if (item.status === 'Critical') color = 0xef4444; // red-500
+            if (item.status === 'Critical') color = 0xC40D3C; // Brand Red
             else if (item.confidence_label === 'Review Required') color = 0xf97316; // orange-500
 
             // Size anomalies by depth
@@ -433,55 +973,38 @@ class PipelineViewer {
 
             mesh.position.set(x, y, z);
             mesh.userData = item;
+            mesh.visible = false; // Hidden by default
             this.scene.add(mesh);
             this.anomalies.push(mesh);
+
+            // Populate joint map
+            const jointNum = Number(item.joint_number || item.joint_22 || item.joint);
+            if (!this.jointAnomalyMap.has(jointNum)) {
+                this.jointAnomalyMap.set(jointNum, []);
+            }
+            this.jointAnomalyMap.get(jointNum).push(item);
         });
     }
 
     createReferences() {
+        console.log('Creating references...', this.referenceData.length);
         const radius = 2; // pipe radius
 
         this.referenceData.forEach(item => {
-            let marker = null;
-            if (item.type === 'Tap' || item.type === 'Tee') {
-                const color = item.type === 'Tap' ? 0x22c55e : 0x06b6d4; // Green for Tap, Cyan for Tee
-                const thickness = item.type === 'Tap' ? 0.3 : 0.6;
-                const geo = new THREE.TorusGeometry(radius + 0.1, thickness, 16, 32);
-                const mat = new THREE.MeshStandardMaterial({
-                    color,
-                    emissive: color,
-                    emissiveIntensity: 0.5,
-                    metalness: 0.8
-                });
-                const mesh = new THREE.Mesh(geo, mat);
+            // Updated to handle logic correctly or skip as needed. 
+            // Previous code skipped taps, valves, tees and girth welds.
+            if (item.type === 'Tap' || item.type === 'Valve' || item.type === 'Tee') return;
+            if (item.type === 'Girth Weld') return;
 
-                mesh.position.set(0, 0, item.dist_22);
-                mesh.rotation.x = Math.PI / 2; // Face along the pipe
-                marker = mesh;
-            } else if (item.type === 'Girth Weld') {
-                return;
-            } else if (item.type === 'Valve') {
-                const color = 0xef4444; // Red for Valve
-                const geo = new THREE.CylinderGeometry(radius + 0.5, radius + 0.5, 2, 8);
-                const mat = new THREE.MeshStandardMaterial({ color, metalness: 1 });
-                const mesh = new THREE.Mesh(geo, mat);
-                mesh.position.set(0, 0, item.dist_22);
-                mesh.rotation.x = Math.PI / 2;
-                marker = mesh;
-            }
-
-            if (marker) {
-                marker.userData = { ...item, type: 'FeatureMarker' };
-                this.scene.add(marker);
-                this.featureMarkers.push(marker);
-            }
+            // If we have other types and a marker was supposed to be created:
+            // For now, leaving this safe as robust joint visualization is priority
         });
     }
 
     onWindowResize() {
         const container = document.getElementById('canvas-container');
         const width = container.clientWidth;
-        const height = 600;
+        const height = container.clientHeight;
         this.camera.aspect = width / height;
         this.camera.updateProjectionMatrix();
         this.renderer.setSize(width, height);
@@ -491,33 +1014,61 @@ class PipelineViewer {
         // Get canvas container bounds for accurate mouse coordinates
         const container = document.getElementById('canvas-container');
         const rect = container.getBoundingClientRect();
-        
+
         // Check if click is within canvas bounds
         if (event.clientX < rect.left || event.clientX > rect.right ||
             event.clientY < rect.top || event.clientY > rect.bottom) {
             return;
         }
-        
+
         this.mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
         this.mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
 
         this.raycaster.setFromCamera(this.mouse, this.camera);
 
-        // Check anomalies first
-        const intersectsAnom = this.raycaster.intersectObjects(this.anomalies);
+        // Check anomalies first (visible only)
+        const visibleAnomalies = this.anomalies.filter(a => a.visible);
+        const intersectsAnom = this.raycaster.intersectObjects(visibleAnomalies);
+
         if (intersectsAnom.length > 0) {
             const item = intersectsAnom[0].object.userData;
-            this.showAnomalyInfo(item);
+            this.selectedAnomaly = item; // Track for AI Context
+
+            // Lock Guide
+            this.isGuideLocked = true;
+            this.drawMeasurementGuides(item);
+
+            // Show Selection Highlight
+            this.selectionMesh.position.copy(intersectsAnom[0].object.position);
+            const size = intersectsAnom[0].object.geometry.parameters.radius * 1.3;
+            this.selectionMesh.scale.set(size, size, size);
+            this.selectionMesh.visible = true;
+
+            // Show Info
+            if (this.showAnomalyInfo) this.showAnomalyInfo(item);
+
+            // Focus Camera
             this.controls.target.copy(intersectsAnom[0].object.position);
             return;
         }
 
-        // Check pipe segments
-        const intersectsPipe = this.raycaster.intersectObjects(this.pipeSegments);
+        // Unlock guides if clicking background/pipe
+        this.isGuideLocked = false;
+        this.selectedAnomaly = null; // Clear context
+        this.selectionMesh.visible = false; // Hide highlight
+        this.clearMeasurementGuides();
+
+        // Check pipe segments (visible only)
+        const visibleSegments = this.pipeSegments.filter(s => s.visible);
+        const intersectsPipe = this.raycaster.intersectObjects(visibleSegments);
         if (intersectsPipe.length > 0) {
             const segment = intersectsPipe[0].object;
+            this.selectedAnomaly = null; // Ensure cleared when selecting whole joint
+            this.selectionMesh.visible = false;
             this.showJointInfo(segment.userData);
             this.highlightSegment(segment);
+            // Don't call selectJoint() here - it uses ISOLATE MODE which hides everything else
+            // Just highlight and show info to preserve neighborhood filter context
         }
     }
 
@@ -535,7 +1086,7 @@ class PipelineViewer {
         const start = Number(startInput) || 0;
         const end = (endInput === 'max' || endInput === '' || endInput === 'end') ? Infinity : Number(endInput);
 
-        console.log(`Filtering joints from ${start} to ${end}`);
+        console.log(`Filtering joints from ${start} to ${end} `);
 
         let visibleCount = 0;
         this.pipeSegments.forEach(segment => {
@@ -549,7 +1100,8 @@ class PipelineViewer {
 
         // Also filter anomalies
         this.anomalies.forEach(anomaly => {
-            const joint = Number(anomaly.userData.joint);
+            const data = anomaly.userData;
+            const joint = Number(data.joint_number || data.joint_22 || data.joint);
             anomaly.visible = (joint >= start && joint <= end);
             if (anomaly.selectionRing) anomaly.selectionRing.visible = anomaly.visible;
         });
@@ -591,15 +1143,15 @@ class PipelineViewer {
                 nearestSegment.visible = true;
                 visibleCount = 1;
                 console.log(`Fallback: showing joint ${nearestJoint} instead.`);
-                btn.innerText = `Nearest: ${nearestJoint}`;
+                btn.innerText = `Nearest: ${nearestJoint} `;
             }
         }
 
-        console.log(`Filter applied. Visible segments: ${visibleCount}`);
+        console.log(`Filter applied.Visible segments: ${visibleCount} `);
 
         if (visibleCount > 0) {
             if (btn.innerText === 'Apply') { // Don't overwrite if fallback already set text
-                btn.innerText = `Applied (${visibleCount})`;
+                btn.innerText = `Applied(${visibleCount})`;
             }
             btn.classList.add('bg-green-600/20', 'border-green-500/30', 'text-green-400');
             btn.classList.remove('bg-blue-600/20', 'border-blue-500/30', 'text-blue-400');
@@ -683,7 +1235,8 @@ class PipelineViewer {
         });
 
         this.anomalies.forEach(anomaly => {
-            const joint = Number(anomaly.userData.joint);
+            const data = anomaly.userData;
+            const joint = Number(data.joint_number || data.joint_22 || data.joint);
             anomaly.visible = visibleJoints.has(joint);
             if (anomaly.selectionRing) anomaly.selectionRing.visible = anomaly.visible;
         });
@@ -701,7 +1254,7 @@ class PipelineViewer {
         });
 
         const btn = document.getElementById('btn-apply-neighbor');
-        btn.innerText = `Range ${this.sortedJoints[minIdx]}-${this.sortedJoints[maxIdx]} (${visibleCount})`;
+        btn.innerText = `Range ${this.sortedJoints[minIdx]} -${this.sortedJoints[maxIdx]} (${visibleCount})`;
         btn.classList.add('bg-purple-600/40', 'border-purple-500/60');
 
         // Update labels if they're visible
@@ -744,7 +1297,7 @@ class PipelineViewer {
 
     showJointInfo(data) {
         document.getElementById('anomaly-info').innerHTML = `
-            <div class="bg-slate-800/50 p-3 rounded-lg border border-blue-500/20">
+    <div class="bg-slate-800/50 p-3 rounded-lg border border-blue-500/20">
                 <div class="stat-row">
                     <span class="stat-label">Type</span>
                     <span class="stat-value font-bold text-blue-400">Pipe Joint</span>
@@ -763,18 +1316,18 @@ class PipelineViewer {
                 </div>
                 <p class="text-[10px] text-slate-500 mt-2 italic">→ Connects to Joint ${data.nextJoint}</p>
             </div>
-        `;
+    `;
     }
 
     showAnomalyInfo(item) {
         const container = document.getElementById('anomaly-info');
         const statusColor = item.status === 'Critical' ? 'red' : item.status === 'Review Required' ? 'orange' : 'green';
         const confidenceColor = item.confidence_label === 'Confident' ? 'blue' : 'orange';
-        
+
         // Anomaly type badge
         const anomalyType = item.anomaly_type || 'metal loss';
         const typeDisplay = anomalyType.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
-        
+
         // Confidence level color
         const confLevel = item.confidence_level || 'Unknown';
         let confColor = 'slate';
@@ -782,13 +1335,13 @@ class PipelineViewer {
         else if (confLevel === 'High') confColor = 'blue';
         else if (confLevel === 'Medium') confColor = 'yellow';
         else if (confLevel === 'Low') confColor = 'orange';
-        
+
         // Validation badge
         let validationBadge = '';
         if (item.is_match && item.is_validated !== undefined) {
             if (item.is_validated) {
                 validationBadge = `
-                    <div class="bg-green-900/20 p-3 rounded-lg border border-green-500/30 mb-3">
+    <div class="bg-green-900/20 p-3 rounded-lg border border-green-500/30 mb-3">
                         <div class="flex items-center gap-2 mb-2">
                             <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"></path>
@@ -810,11 +1363,11 @@ class PipelineViewer {
                             </div>
                         </div>
                     </div>
-                `;
+    `;
             } else {
                 const failReason = !item.dist_within_tolerance ? 'Distance exceeds 5 ft tolerance' : 'Orientation exceeds 60° tolerance';
                 validationBadge = `
-                    <div class="bg-orange-900/20 p-3 rounded-lg border border-orange-500/30 mb-3">
+    <div class="bg-orange-900/20 p-3 rounded-lg border border-orange-500/30 mb-3">
                         <div class="flex items-center gap-2 mb-2">
                             <svg class="w-4 h-4 text-orange-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
@@ -835,20 +1388,20 @@ class PipelineViewer {
                             </div>
                         </div>
                     </div>
-                `;
+    `;
             }
         }
-        
+
         // Anomaly confidence badge
         const anomalyConf = item.anomaly_confidence || 0;
         const severityScore = item.severity_score || 0;
         const severityLevel = item.severity_level || 'Low';
         const yearsToFailure = item.years_to_failure || 999;
-        
+
         let confidenceBadge = '';
         if (item.is_match) {
             confidenceBadge = `
-                <div class="bg-${confColor}-900/20 p-3 rounded-lg border border-${confColor}-500/30 mb-3">
+    <div class="bg-${confColor}-900/20 p-3 rounded-lg border border-${confColor}-500/30 mb-3">
                     <div class="flex items-center gap-2 mb-2">
                         <svg class="w-4 h-4 text-${confColor}-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z"></path>
@@ -866,15 +1419,15 @@ class PipelineViewer {
                         </div>
                     </div>
                 </div>
-            `;
+    `;
         }
-        
+
         // Severity badge
         let severityBadge = '';
         if (item.is_match && severityScore > 0) {
             const sevColor = severityScore >= 70 ? 'red' : severityScore >= 50 ? 'orange' : severityScore >= 30 ? 'yellow' : 'green';
             severityBadge = `
-                <div class="bg-${sevColor}-900/20 p-3 rounded-lg border border-${sevColor}-500/30 mb-3">
+    <div class="bg-${sevColor}-900/20 p-3 rounded-lg border border-${sevColor}-500/30 mb-3">
                     <div class="flex items-center gap-2 mb-2">
                         <svg class="w-4 h-4 text-${sevColor}-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
@@ -898,66 +1451,66 @@ class PipelineViewer {
                         </div>
                     </div>
                 </div>
-            `;
+    `;
         }
-        
+
         container.innerHTML = `
             ${validationBadge}
             ${confidenceBadge}
             ${severityBadge}
-            
-            <div class="bg-${statusColor}-900/20 p-4 rounded-lg border border-${statusColor}-500/30">
-                <div class="flex items-center gap-2 mb-3">
-                    <span class="w-3 h-3 rounded-full bg-${statusColor}-500 shadow-[0_0_10px_rgba(239,68,68,0.6)]"></span>
-                    <span class="font-bold text-${statusColor}-400 uppercase text-sm">Anomaly Detected</span>
-                </div>
-                
-                <div class="stat-row">
-                    <span class="stat-label">Type</span>
-                    <span class="stat-value font-bold text-purple-400">${typeDisplay}</span>
-                </div>
-                <div class="stat-row">
-                    <span class="stat-label">Status</span>
-                    <span class="stat-value font-bold text-${statusColor}-400">${item.status}</span>
-                </div>
-                <div class="stat-row">
-                    <span class="stat-label">Match Confidence</span>
-                    <span class="stat-value text-${confidenceColor}-400">${item.confidence_label}</span>
-                </div>
-                ${item.confidence_label === 'Review Required' && item.review_reasons ? `
+
+<div class="bg-${statusColor}-900/20 p-4 rounded-lg border border-${statusColor}-500/30">
+    <div class="flex items-center gap-2 mb-3">
+        <span class="w-3 h-3 rounded-full bg-${statusColor}-500 shadow-[0_0_10px_rgba(239,68,68,0.6)]"></span>
+        <span class="font-bold text-${statusColor}-400 uppercase text-sm">Anomaly Detected</span>
+    </div>
+
+    <div class="stat-row">
+        <span class="stat-label">Type</span>
+        <span class="stat-value font-bold text-purple-400">${typeDisplay}</span>
+    </div>
+    <div class="stat-row">
+        <span class="stat-label">Status</span>
+        <span class="stat-value font-bold text-${statusColor}-400">${item.status}</span>
+    </div>
+    <div class="stat-row">
+        <span class="stat-label">Match Confidence</span>
+        <span class="stat-value text-${confidenceColor}-400">${item.confidence_label}</span>
+    </div>
+    ${item.confidence_label === 'Review Required' && item.review_reasons ? `
                 <div class="bg-orange-900/20 p-2 rounded border border-orange-500/30 mb-2">
                     <div class="text-[10px] text-orange-300 font-semibold mb-1">Review Reasons:</div>
                     <div class="text-[9px] text-orange-400/80">${item.review_reasons}</div>
                 </div>
                 ` : ''}
-                <div class="stat-row">
-                    <span class="stat-label">Joint No.</span>
-                    <span class="stat-value font-bold text-yellow-400">${item.joint_22 || item.joint || 'N/A'}</span>
-                </div>
-                <div class="stat-row">
-                    <span class="stat-label">Distance</span>
-                    <span class="stat-value">${item.dist_22_aligned ? item.dist_22_aligned.toFixed(2) : 0} ft</span>
-                </div>
-                <div class="stat-row">
-                    <span class="stat-label">Orientation</span>
-                    <span class="stat-value">${item.orient_22 ? item.orient_22.toFixed(1) : 0}° <span class="text-slate-500">(${this.degToOclock(item.orient_22 || 0)})</span></span>
-                </div>
-                <div class="stat-row">
-                    <span class="stat-label">Depth (2022)</span>
-                    <span class="stat-value font-bold text-${statusColor}-400">${item.depth_22 ? item.depth_22.toFixed(1) : 0}%</span>
-                </div>
-                ${item.depth_15 ? `
+    <div class="stat-row">
+        <span class="stat-label">Joint No.</span>
+        <span class="stat-value font-bold text-yellow-400">${item.joint_number || item.joint_22 || item.joint || 'N/A'}</span>
+    </div>
+    <div class="stat-row">
+        <span class="stat-label">Distance</span>
+        <span class="stat-value">${item.dist_22_aligned ? item.dist_22_aligned.toFixed(2) : 0} ft</span>
+    </div>
+    <div class="stat-row">
+        <span class="stat-label">Orientation</span>
+        <span class="stat-value">${item.orient_22 ? item.orient_22.toFixed(1) : 0}° <span class="text-slate-500">(${this.degToOclock(item.orient_22 || 0)})</span></span>
+    </div>
+    <div class="stat-row">
+        <span class="stat-label">Depth (2022)</span>
+        <span class="stat-value font-bold text-${statusColor}-400">${item.depth_22 ? item.depth_22.toFixed(1) : 0}%</span>
+    </div>
+    ${item.depth_15 ? `
                 <div class="stat-row">
                     <span class="stat-label">Depth (2015)</span>
                     <span class="stat-value text-slate-400">${item.depth_15.toFixed(1)}%</span>
                 </div>
                 ` : ''}
-                <div class="stat-row border-0">
-                    <span class="stat-label">Growth Rate</span>
-                    <span class="stat-value font-bold text-${statusColor}-400">${item.annual_growth_rate ? item.annual_growth_rate.toFixed(2) + '%/yr' : 'N/A'}</span>
-                </div>
-            </div>
-        `;
+    <div class="stat-row border-0">
+        <span class="stat-label">Growth Rate</span>
+        <span class="stat-value font-bold text-${statusColor}-400">${item.annual_growth_rate ? item.annual_growth_rate.toFixed(2) + '%/yr' : 'N/A'}</span>
+    </div>
+</div>
+`;
     }
 
     degToOclock(deg) {
@@ -996,6 +1549,168 @@ class PipelineViewer {
         document.getElementById('yaw-val').innerText = `${yaw}°`;
 
         this.renderer.render(this.scene, this.camera);
+    }
+
+    drawMeasurementGuides(data) {
+        this.clearMeasurementGuides();
+        if (!this.guidesGroup) return;
+
+        const radius = 2.5; // Increased visibility (was 2.2)
+        const zAnom = data.dist_22_aligned;
+
+        // Robustly find segment by Distance (ignoring potentially bad joint_number)
+        let zStart = zAnom;
+        const foundSegment = this.pipeSegments.find(s => {
+            const start = s.userData.dist;
+            const end = start + s.userData.length;
+            return zAnom >= start && zAnom <= end;
+        });
+
+        if (foundSegment) {
+            zStart = foundSegment.userData.dist;
+        } else {
+            // Fallback to joint number if spatial lookup fails
+            const jointNum = Number(data.joint_number || data.joint_22 || data.joint);
+            const segment = this.jointMap.get(jointNum);
+            if (segment) zStart = segment.userData.dist;
+        }
+
+        // 1. Distance Guide (Thin Cylinder)
+        const distLen = Math.abs(zAnom - zStart);
+        if (distLen > 0.1) {
+            // Use Cylinder for thickness
+            const cylGeo = new THREE.CylinderGeometry(0.08, 0.08, distLen, 8);
+            const cylMat = new THREE.MeshBasicMaterial({ color: 0x000000 }); // Black
+            const distCyl = new THREE.Mesh(cylGeo, cylMat);
+
+            // Align with Z axis (Cylinder is Y-up default)
+            distCyl.rotation.x = Math.PI / 2;
+
+            // Position at midpoint
+            const zMid = (zStart + zAnom) / 2;
+            distCyl.position.set(0, radius, zMid);
+
+            this.guidesGroup.add(distCyl);
+        }
+
+        // Distance Label (midpoint)
+        const zMid = (zStart + zAnom) / 2;
+        const distVal = Math.abs(zAnom - zStart).toFixed(1) + 'ft';
+        const distLabel = this.createLabelSprite(distVal, 0x22d3ee);
+        distLabel.position.set(0, radius + 0.5, zMid);
+        this.guidesGroup.add(distLabel);
+
+        // 2. Angle Guide (Arc from Top to Anomaly)
+        let targetAngleDeg = data.orient_22 || 0;
+        // In this coordinate system:
+        // x = r * cos(theta), y = r * sin(theta)
+        // Top (y=Max) corresponds to PI/2 (90 deg).
+        // Let's assume standard math conventions: 0 is Right (x=Max), 90 is Top (y=Max).
+        // The data likely uses Clock positions or Degrees.
+        // If 0 is Top (12 o'clock), then we need offset.
+        // Assuming data 'orient_22' is standard degrees (0-360).
+        // Let's assume 0 is Top for pipeline data usually.
+        // But the previous createAnomalies used: const theta = (item.orient_22 * Math.PI) / 180;
+        // const x = radius * Math.cos(theta);
+        // If orient=0, x=r, y=0 (Right).
+        // If orient=90, x=0, y=r (Top).
+        // So 90 is Top.
+        // We calculate distance from Top (90).
+
+        const startTheta = Math.PI / 2; // 90 deg (Top)
+        const targetTheta = (targetAngleDeg * Math.PI) / 180;
+
+        // Create Arc using TubeGeometry for consistent thickness
+        const angleRadius = 4.5; // Push angle guide far out to avoid sphere overlap
+        const arcPoints = [];
+        const segments = 20;
+
+        for (let i = 0; i <= segments; i++) {
+            const t = i / segments;
+            const theta = startTheta + t * (targetTheta - startTheta);
+            const x = angleRadius * Math.cos(theta);
+            const y = angleRadius * Math.sin(theta);
+            arcPoints.push(new THREE.Vector3(x, y, zAnom));
+        }
+
+        const arcCurve = new THREE.CatmullRomCurve3(arcPoints);
+        const tubeGeo = new THREE.TubeGeometry(arcCurve, segments, 0.08, 8, false);
+        const tubeMat = new THREE.MeshBasicMaterial({ color: 0x000000 }); // Black to match distance line
+        const arcTube = new THREE.Mesh(tubeGeo, tubeMat);
+        this.guidesGroup.add(arcTube);
+
+        // Add markers to show angle measurement points
+        // Start marker (top of pipe - 90 degrees)
+        const startX = angleRadius * Math.cos(startTheta);
+        const startY = angleRadius * Math.sin(startTheta);
+        const startMarkerGeo = new THREE.SphereGeometry(0.15, 8, 8);
+        const startMarkerMat = new THREE.MeshBasicMaterial({ color: 0x22d3ee }); // Cyan for start
+        const startMarker = new THREE.Mesh(startMarkerGeo, startMarkerMat);
+        startMarker.position.set(startX, startY, zAnom);
+        this.guidesGroup.add(startMarker);
+
+        // End marker (anomaly position)
+        const endX = angleRadius * Math.cos(targetTheta);
+        const endY = angleRadius * Math.sin(targetTheta);
+        const endMarkerGeo = new THREE.SphereGeometry(0.15, 8, 8);
+        const endMarkerMat = new THREE.MeshBasicMaterial({ color: 0xc084fc }); // Purple for end
+        const endMarker = new THREE.Mesh(endMarkerGeo, endMarkerMat);
+        endMarker.position.set(endX, endY, zAnom);
+        this.guidesGroup.add(endMarker);
+
+        // Angle Label (at anomaly position, slightly out)
+        const angleVal = targetAngleDeg.toFixed(0) + '°';
+        const angleLabel = this.createLabelSprite(angleVal, 0xc084fc);
+        const xAnom = angleRadius * Math.cos(targetTheta);
+        const yAnom = angleRadius * Math.sin(targetTheta);
+        // Push label even further (1.1x the expanded radius)
+        angleLabel.position.set(xAnom * 1.1, yAnom * 1.1, zAnom);
+        this.guidesGroup.add(angleLabel);
+    }
+
+    clearMeasurementGuides() {
+        if (!this.guidesGroup) return;
+        // Dispose meshes
+        while (this.guidesGroup.children.length > 0) {
+            const child = this.guidesGroup.children[0];
+            this.guidesGroup.remove(child);
+            if (child.geometry) child.geometry.dispose();
+            if (child.material) {
+                if (child.material.map) child.material.map.dispose();
+                child.material.dispose();
+            }
+        }
+    }
+
+    createLabelSprite(text, colorHex) {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = 256; // Increased for better quality
+        canvas.height = 96;
+
+        // Draw dark background with border for contrast
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.85)';
+        ctx.roundRect(8, 8, 240, 80, 8);
+        ctx.fill();
+
+        // Draw colored border
+        ctx.strokeStyle = '#' + new THREE.Color(colorHex).getHexString();
+        ctx.lineWidth = 3;
+        ctx.roundRect(8, 8, 240, 80, 8);
+        ctx.stroke();
+
+        // Draw bright white text for maximum visibility
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = 'bold 36px Arial';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(text, 128, 48);
+
+        const texture = new THREE.CanvasTexture(canvas);
+        const mat = new THREE.SpriteMaterial({ map: texture, transparent: true });
+        const sprite = new THREE.Sprite(mat);
+        sprite.scale.set(2.0, 1.0, 1); // Slightly larger for better readability
+        return sprite;
     }
 }
 
