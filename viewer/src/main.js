@@ -327,12 +327,62 @@ class PipelineViewer {
     }
 
     flyToNextCritical() {
-        const criticals = this.anomalyData.filter(a => a.status === 'Critical');
+        if (!this.anomalyData) return;
+        const criticals = this.anomalyData
+            .filter(a => a.status === 'Critical')
+            .sort((a, b) => (b.annual_growth_rate || 0) - (a.annual_growth_rate || 0));
+            
         if (criticals.length === 0) return;
 
         this.criticalIndex = (this.criticalIndex + 1) % criticals.length;
         const item = criticals[this.criticalIndex];
-        this.jumpTo(item);
+
+        // Route to Neighborhood Filter as requested
+        const joint = Number(item.joint_number || item.joint_22 || item.joint);
+        const centerInput = document.getElementById('neighbor-center');
+        const radiusInput = document.getElementById('neighbor-radius');
+
+        if (centerInput && radiusInput) {
+            centerInput.value = joint;
+            radiusInput.value = 5;
+            this.applyNeighborhoodFilter();
+        }
+
+        // Apply neighborhood filter jumps to the joint, use setTimeout to explicitly jump to the anomaly
+        setTimeout(() => {
+            this.jumpTo(item);
+            const growthRate = item.annual_growth_rate ? item.annual_growth_rate.toFixed(2) + '%/yr' : 'Unknown';
+            this.showSystemMessage(`🚨 Critical Zone (Joint ${joint}) - Growth Rate: <span class="text-xl">${growthRate}</span>`, 'danger');
+        }, 50);
+    }
+
+    showSystemMessage(message, type = 'info') {
+        let toast = document.getElementById('system-toast');
+        if (!toast) {
+            toast = document.createElement('div');
+            toast.id = 'system-toast';
+            document.body.appendChild(toast);
+        }
+
+        const colors = {
+            info: 'bg-blue-600/90 border-blue-500 text-white',
+            danger: 'bg-red-600/90 border-red-500 text-white',
+            warning: 'bg-orange-500/90 border-orange-400 text-white'
+        };
+
+        toast.className = `fixed top-24 left-1/2 -translate-x-1/2 px-6 py-4 rounded-xl font-bold shadow-2xl border backdrop-blur-md z-[100] transition-all transform duration-300 opacity-0 -translate-y-4 ${colors[type] || colors.info}`;
+        toast.innerHTML = message;
+        
+        setTimeout(() => {
+            toast.classList.remove('opacity-0', '-translate-y-4');
+            toast.classList.add('opacity-100', 'translate-y-0');
+        }, 10);
+
+        if (this.toastTimeout) clearTimeout(this.toastTimeout);
+        this.toastTimeout = setTimeout(() => {
+            toast.classList.remove('opacity-100', 'translate-y-0');
+            toast.classList.add('opacity-0', '-translate-y-4');
+        }, 5000);
     }
 
     filterByStatus(status) {
