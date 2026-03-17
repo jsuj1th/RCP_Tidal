@@ -275,9 +275,8 @@ class PipelineViewer {
             const jointNum = Number(data.joint);
             const anomalies = this.jointAnomalyMap.get(jointNum) || [];
 
-            // Critical anomalies count
             const criticalCount = anomalies.filter(a => a.status === 'Critical').length;
-            const reviewCount = anomalies.filter(a => a.confidence_label === 'Review Required').length;
+            const reviewCount = anomalies.filter(a => a.status === 'Review Required').length;
 
             let anomalyHtml = '';
             if (anomalies.length > 0) {
@@ -1294,7 +1293,7 @@ class PipelineViewer {
             // Color based on severity
             let color = 0x22c55e; // green-500 (Normal)
             if (item.status === 'Critical') color = 0xC40D3C; // Brand Red
-            else if (item.confidence_label === 'Review Required') color = 0xeab308; // yellow-500
+            else if (item.status === 'Review Required') color = 0xeab308; // yellow-500
 
             // Size patches by depth percentage (larger depth = larger patch)
             // Scale from 0.3 to 1.5 based on depth
