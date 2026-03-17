@@ -3,6 +3,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { LeafletMapIntegration } from './leafletMap.js';
 import { checkProximityToSensitiveLocations, getProximityAlertLevel, formatLocationType } from './geoData.js';
 import { PIPELINE_START_COORDS, GOOGLE_MAPS_API_KEY } from './config.js';
+import { StreetViewIntegration } from './streetView.js';
 
 class PipelineViewer {
     constructor() {
@@ -87,6 +88,11 @@ class PipelineViewer {
         this.mapVisible = false;
         document.getElementById('btn-toggle-map').onclick = () => this.toggleMap();
 
+        // Street View Integration
+        this.streetViewIntegration = new StreetViewIntegration();
+        this.streetViewVisible = false;
+        const toggleSvBtn = document.getElementById('btn-toggle-street-view');
+        if (toggleSvBtn) toggleSvBtn.onclick = () => this.toggleStreetView();
 
         this.init();
         this.animate();
@@ -506,6 +512,7 @@ class PipelineViewer {
 
         // Initialize Google Maps
         await this.initializeMap();
+        await this.initializeStreetView();
 
         await this.setupChat();
     }
@@ -584,6 +591,60 @@ class PipelineViewer {
     }
 
     // ==================== STREET VIEW ====================
+    async initializeStreetView() {
+        try {
+            console.log('Initializing Street View...');
+            await this.streetViewIntegration.init();
+            console.log('Street View initialized successfully!');
+        } catch (error) {
+            console.error('Failed to initialize Street View:', error);
+            const svBtn = document.getElementById('btn-toggle-street-view');
+            if (svBtn) svBtn.style.display = 'none';
+        }
+    }
+
+    toggleStreetView() {
+        this.streetViewVisible = !this.streetViewVisible;
+        const svContainer = document.getElementById('street-view-container');
+        const toggleText = document.getElementById('street-view-toggle-text');
+        
+        if (this.streetViewVisible) {
+            svContainer.classList.remove('hidden');
+            svContainer.style.display = 'block';
+            
+            if (this.mapVisible) {
+                this.toggleMap(); // hide map if it's visible
+            }
+            
+            if (this.renderer && this.renderer.domElement) {
+                this.renderer.domElement.style.display = 'none';
+            }
+            
+            toggleText.textContent = 'Hide Street View';
+            
+            this.updateStreetViewLocation();
+            setTimeout(() => this.streetViewIntegration.resize(), 100);
+            console.log('Street view activated');
+        } else {
+            svContainer.classList.add('hidden');
+            svContainer.style.display = 'none';
+            
+            if (this.renderer && this.renderer.domElement) {
+                this.renderer.domElement.style.display = 'block';
+            }
+            
+            toggleText.textContent = 'Show Street View';
+            console.log('3D view activated');
+        }
+    }
+
+    updateStreetViewLocation() {
+        if (!this.streetViewVisible) return;
+        
+        const slider = document.getElementById('dist-slider');
+        const dist = slider ? parseFloat(slider.value) : 0;
+        this.streetViewIntegration.showStreetView(dist);
+    }
 
     async setupChat() {
         // UI Elements
@@ -1909,6 +1970,7 @@ class PipelineViewer {
         this.controls.target.z = val;
         this.controls.update();
         this.updateDistDisplay(val);
+        this.updateStreetViewLocation();
     }
 
     updateDistDisplay(val) {
@@ -1925,6 +1987,7 @@ class PipelineViewer {
         if (slider && Math.abs(slider.value - currentZ) > 1) {
             slider.value = currentZ;
             this.updateDistDisplay(currentZ);
+            this.updateStreetViewLocation();
         }
 
         const pitch = Math.round(this.controls.getPolarAngle() * (180 / Math.PI));

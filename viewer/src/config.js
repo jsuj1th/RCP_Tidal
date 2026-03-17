@@ -1,7 +1,7 @@
 // Featherless.ai API Configuration
 // Get your free API key at: https://featherless.ai/
 
-export const FEATHERLESS_API_KEY = 'rc_4224af6d70b9aa5674a6588363755440ade42e6d1a7ef6b28b445a5f3750deea';
+export const FEATHERLESS_API_KEY = 'rc_7b1bf25f8b748d4df69fd46efce9f9b802aec5647778ba7fcd7ce5f2492452da';
 export const FEATHERLESS_API_URL = 'https://api.featherless.ai/v1/chat/completions';
 export const FEATHERLESS_MODEL = 'meta-llama/Meta-Llama-3.1-8B-Instruct';
 
@@ -12,7 +12,7 @@ export const FEATHERLESS_MODEL = 'meta-llama/Meta-Llama-3.1-8B-Instruct';
 // 4. Save this file
 
 // Google Maps API Configuration
-export const GOOGLE_MAPS_API_KEY = 'AIzaSyD_FDETpmVUdDwvNI3BfOgwwIzitEg_MLM';
+export const GOOGLE_MAPS_API_KEY = 'AIzaSyC96p21BWfYlJc90gFwuhuebjSl437Of3c';
 
 // Pipeline Geographic Configuration
 // Example: Houston, TX area pipeline
